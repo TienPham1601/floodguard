@@ -308,9 +308,32 @@ class FirebaseService {
     return db.collection('flood_reports').where('reportedAt', isGreaterThan: cut).snapshots().map((s) => s.docs.map((d) => FloodReport.fromFirestore(d)).toList());
   }
 
-  static Stream<List<SOSRequest>> streamActiveSOS() {
-    // Luồng này dành cho cứu hộ, xem mọi đơn.
-    return db.collection('sos_requests').where('status', isNotEqualTo: 'done').snapshots().map((s) => s.docs.map((d) => SOSRequest.fromFirestore(d)).toList());
+  static Stream<List<SOSRequest>> streamActiveSOS({bool isRescuer = false}) {
+    final user = auth.currentUser;
+    if (user == null) return Stream.value([]);
+
+    Query<Map<String, dynamic>> query = db.collection('sos_requests');
+    
+    // NGUYÊN TẮC: Driver chỉ xem đơn của mình, Rescuer xem mọi đơn
+    if (!isRescuer) {
+      debugPrint('FIREBASE_QUERY: Driver role - filtering by requesterId: ${user.uid}');
+      query = query.where('requesterId', isEqualTo: user.uid);
+    } else {
+      debugPrint('FIREBASE_QUERY: Rescuer role - fetching all active requests');
+    }
+
+    // Lắng nghe realtime
+    return query.snapshots().map((snap) {
+      final docs = snap.docs.map((d) => SOSRequest.fromFirestore(d)).toList();
+      
+      // LỌC PHÍA CLIENT theo trạng thái hoạt động (Nhóm các trạng thái active)
+      final activeDocs = docs.where((r) => 
+        ['pending', 'accepted', 'processing', 'expanded'].contains(r.status)
+      ).toList();
+
+      debugPrint('FIREBASE_QUERY: Found ${docs.length} total, ${activeDocs.length} active after client-side filter');
+      return activeDocs;
+    });
   }
 
   static Future<void> createSOS({required String vehicleId, required String plate, required String model, required double lat, required double lng, required int waterCm}) async {

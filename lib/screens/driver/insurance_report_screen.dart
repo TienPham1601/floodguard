@@ -2,11 +2,9 @@ import 'dart:async';
 import 'dart:developer' as dev;
 import 'dart:io';
 import 'package:flutter/material.dart';
-// Removed unused imports
 import 'package:image_picker/image_picker.dart';
 import 'package:intl/intl.dart';
 import 'package:share_plus/share_plus.dart';
-import 'package:flutter_animate/flutter_animate.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:url_launcher/url_launcher.dart' as url_launcher;
 import '../../theme.dart';
@@ -35,7 +33,6 @@ class _InsuranceReportScreenState extends State<InsuranceReportScreen> {
   bool _loading = false;
   List<SOSRequest> _recentSOS = [];
   
-  // Thông tin xe được chọn từ SOS (nếu dùng nguồn SOS)
   String? _manualVehiclePlate;
   String? _manualVehicleModel;
   
@@ -66,6 +63,7 @@ class _InsuranceReportScreenState extends State<InsuranceReportScreen> {
       if (mounted) _emailCtrl.text = prof?['insuranceEmail'] ?? '';
       
       final sosList = await FirebaseService.getRecentSOS(limit: 5);
+      dev.log('INSURANCE_INIT: SOS count = ${sosList.length}');
       if (mounted) {
         setState(() {
           _recentSOS = sosList;
@@ -92,6 +90,7 @@ class _InsuranceReportScreenState extends State<InsuranceReportScreen> {
 
   void _useSOSLocation(SOSRequest sos) async {
     setState(() {
+       _loading = true;
        _selectedSOSId = sos.id;
     });
     final addr = await SearchService.reverseGeocode(sos.latitude, sos.longitude);
@@ -103,6 +102,7 @@ class _InsuranceReportScreenState extends State<InsuranceReportScreen> {
         _manualVehicleModel = sos.vehicleModel;
         _targetTime = sos.createdAt;
         _sourceName = 'SOS Gần đây';
+        _loading = false;
       });
     }
   }
@@ -110,20 +110,20 @@ class _InsuranceReportScreenState extends State<InsuranceReportScreen> {
   void _useCurrentLocation() async {
     setState(() {
       _loading = true;
-      _address = 'Đang lấy vị trí...'; // HIỂN THỊ TRẠNG THÁI CHỜ
+      _address = 'Đang xác định vị trí...';
       _selectedSOSId = null;
       _manualVehicleModel = null;
       _manualVehiclePlate = null;
     });
-    
+
     try {
-      dev.log('INSURANCE_GPS: Requesting current position...');
+      dev.log('INSURANCE_GPS: Getting current position...');
       final pos = await LocationService.getCurrentLocation();
       
       if (pos != null) {
         dev.log('INSURANCE_GPS: Got coordinates: ${pos.latitude}, ${pos.longitude}');
         final addr = await SearchService.reverseGeocode(pos.latitude, pos.longitude);
-        dev.log('INSURANCE_GPS: Geocode result: $addr');
+        dev.log('INSURANCE_GPS: Address: $addr');
         
         if (mounted) {
           setState(() {
@@ -135,21 +135,16 @@ class _InsuranceReportScreenState extends State<InsuranceReportScreen> {
           });
         }
       } else {
-        dev.log('INSURANCE_GPS: Position returned null');
-        if (mounted) {
-          setState(() {
-            _address = 'Không thể lấy GPS. Vui lòng thử lại.';
-            _loading = false;
-          });
-        }
+        throw 'Không thể lấy GPS. Hãy đảm bảo đã bật vị trí.';
       }
     } catch (e) {
       dev.log('INSURANCE_GPS_ERROR: $e');
       if (mounted) {
         setState(() {
-          _address = 'Lỗi GPS: $e';
+          _address = 'Chưa xác định (Lỗi GPS)';
           _loading = false;
         });
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Lỗi định vị: $e')));
       }
     }
   }
@@ -275,7 +270,8 @@ FloodGuard Safety System
     final confirm = await showDialog<bool>(context: context, builder: (ctx) => AlertDialog(title: const Text('Xóa?'), content: const Text('Xóa khỏi danh sách?'), actions: [TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Hủy')), TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Xóa', style: TextStyle(color: Colors.red)))]));
     if (confirm == true) {
       await FirebaseService.deleteSOSRequest(sos.id);
-      setState(() => _recentSOS.removeWhere((item) => item.id == sos.id));
+      final list = await FirebaseService.getRecentSOS(limit: 5);
+      if (mounted) setState(() => _recentSOS = list);
     }
   }
 
@@ -286,7 +282,6 @@ FloodGuard Safety System
         Text('Bước 1: Xác định vị trí sự cố', style: T.title(context)),
         const SizedBox(height: 24),
         
-        // LUÔN HIỂN THỊ MỤC SOS GẦN ĐÂY (VẤN ĐỀ 1)
         Text('SOS GẦN ĐÂY', style: T.caption(context).copyWith(fontWeight: FontWeight.bold)),
         const SizedBox(height: 8),
         if (_recentSOS.isNotEmpty) 
@@ -359,7 +354,7 @@ FloodGuard Safety System
             _row('Thời gian', DateFormat('HH:mm dd/MM').format(_targetTime)),
             _row('Vị trí', _address),
             const Divider(),
-            Text(_descCtrl.text.isEmpty ? 'Không có mô tả' : _descCtrl.text),
+            _previewDesc(),
           ])),
           const SizedBox(height: 24),
           AppButton('Gửi báo cáo', onTap: () => _send(model, plate)),
@@ -368,7 +363,9 @@ FloodGuard Safety System
     );
   }
 
-  Widget _row(String k, String v) => Padding(padding: const EdgeInsets.symmetric(vertical: 4), child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Text(k, style: T.caption(context)), Text(v, style: T.small(context).copyWith(fontWeight: FontWeight.bold))]));
+  Widget _previewDesc() => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text('Mô tả sự cố:', style: T.caption(context)), const SizedBox(height: 4), Text(_descCtrl.text.isEmpty ? 'Không có mô tả' : _descCtrl.text, style: T.small(context))]);
+
+  Widget _row(String k, String v) => Padding(padding: const EdgeInsets.symmetric(vertical: 8), child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [SizedBox(width: 90, child: Text(k, style: T.caption(context))), Expanded(child: Text(v, style: T.small(context).copyWith(fontWeight: FontWeight.bold)))]));
 
   Widget _navigationButtons() => Container(padding: const EdgeInsets.all(24), child: Row(children: [_step > 0 ? Expanded(child: AppButton('Quay lại', tone: Tone.ghost, onTap: () => setState(() => _step--))) : const SizedBox(), const SizedBox(width: 16), Expanded(child: AppButton(_step == 3 ? 'Gửi báo cáo' : 'Tiếp theo', onTap: () { if(_step < 3) setState(() => _step++); }))]));
 }

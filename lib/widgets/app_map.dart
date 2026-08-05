@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:ui';
-// Removed unused: dart:math
+import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_map_cancellable_tile_provider/flutter_map_cancellable_tile_provider.dart';
@@ -211,32 +211,73 @@ class AppMapState extends State<AppMap> {
               }).toList(),
             ),
             StreamBuilder<List<SOSRequest>>(
-              stream: FirebaseService.streamActiveSOS(),
+              stream: FirebaseService.streamActiveSOS(isRescuer: widget.isRescuerMode),
               builder: (c, snap) {
                 final requests = snap.data ?? [];
-                return MarkerLayer(markers: requests.map((r) => Marker(
-                  point: LatLng(r.latitude, r.longitude),
-                  width: 80, height: 80,
-                  child: GestureDetector(
-                    onTap: () => _showSOSDetail(r),
-                    child: Stack(
-                      alignment: Alignment.center,
-                      children: [
-                        // RIPPLE EFFECT
-                        Container(
-                          width: 30, height: 30,
-                          decoration: BoxDecoration(shape: BoxShape.circle, border: Border.all(color: Colors.red.withValues(alpha: 0.5), width: 2)),
-                        ).animate(onPlay: (c) => c.repeat()).scale(begin: const Offset(1,1), end: const Offset(2.5, 2.5), duration: const Duration(seconds: 2), curve: Curves.easeOut).fade(begin: 0.7, end: 0),
-                        
-                        Container(
-                          padding: const EdgeInsets.all(10),
-                          decoration: BoxDecoration(color: Colors.red.shade700, shape: BoxShape.circle, border: Border.all(color: Colors.white, width: 3), boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 10, offset: Offset(0, 4))]),
-                          child: const Icon(Icons.sos, color: Colors.white, size: 24),
-                        ),
-                      ],
+                // LOG KIỂM CHỨNG (BƯỚC 1)
+                debugPrint('MAP_SOS_DEBUG: requests.length=${requests.length}');
+                for (var r in requests) {
+                  debugPrint('MAP_SOS_DEBUG: id=${r.id}, status=${r.status}, pos=${r.latitude},${r.longitude}');
+                }
+                
+                // --- NHÓM CỤM MARKER SOS (CHỐNG CHỒNG CHÉO) ---
+                final List<List<SOSRequest>> clusters = [];
+                const double clusterDistanceThreshold = 0.0005; // ~50m
+
+                for (var r in requests) {
+                  bool added = false;
+                  for (var cluster in clusters) {
+                    final first = cluster.first;
+                    final dist = sqrt(pow(r.latitude - first.latitude, 2) + pow(r.longitude - first.longitude, 2));
+                    if (dist < clusterDistanceThreshold) {
+                      cluster.add(r);
+                      added = true;
+                      break;
+                    }
+                  }
+                  if (!added) clusters.add([r]);
+                }
+
+                return MarkerLayer(markers: clusters.map((cluster) {
+                  final r = cluster.first;
+                  final count = cluster.length;
+
+                  return Marker(
+                    point: LatLng(r.latitude, r.longitude),
+                    width: 60, height: 60,
+                    child: GestureDetector(
+                      onTap: () => count > 1 ? _showSOSList(cluster) : _showSOSDetail(r),
+                      child: Stack(
+                        alignment: Alignment.center,
+                        children: [
+                          // 1. RIPPLE EFFECT (DƯỚI CÙNG, LAN TỎA MƯỢT - SỬA LỖI d)
+                          IgnorePointer(
+                            child: Container(
+                              width: 30, height: 30,
+                              decoration: BoxDecoration(shape: BoxShape.circle, border: Border.all(color: Colors.red.withValues(alpha: 0.3), width: 1.5)),
+                            ).animate(onPlay: (c) => c.repeat()).scale(begin: const Offset(1,1), end: const Offset(2.2, 2.2), duration: const Duration(seconds: 2), curve: Curves.easeOut).fade(begin: 0.5, end: 0, duration: const Duration(seconds: 2)),
+                          ),
+                          
+                          // 2. MAIN STATIC MARKER (TRÊN CÙNG, LUÔN HIỆN RÕ - SỬA LỖI b)
+                          Container(
+                            width: 44, height: 44,
+                            decoration: BoxDecoration(
+                              color: Colors.red.shade700, 
+                              shape: BoxShape.circle, 
+                              border: Border.all(color: Colors.white, width: 3), 
+                              boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 8, offset: Offset(0, 3))]
+                            ),
+                            child: Center(
+                              child: count > 1 
+                                ? Text('$count', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16))
+                                : const Icon(Icons.sos, color: Colors.white, size: 22),
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
-                  ),
-                )).toList());
+                  );
+                }).toList());
               },
             ),
             StreamBuilder<List<FloodReport>>(
@@ -292,6 +333,44 @@ class AppMapState extends State<AppMap> {
         if (widget.target != null && _currentRoute != null && !_isNavigating) Positioned(left: 16, right: 16, bottom: 24, child: _routeCard().animate().slideY(begin: 1.0, end: 0.0)),
         if (_loadingRoute) const Center(child: CircularProgressIndicator()),
       ],
+    );
+  }
+
+  void _showSOSList(List<SOSRequest> requests) {
+    showModalBottomSheet(
+      context: context,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
+      builder: (ctx) => Container(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Danh sách cứu hộ tại khu vực', style: T.title(ctx)),
+            const SizedBox(height: 16),
+            Flexible(
+              child: ListView.separated(
+                shrinkWrap: true,
+                itemCount: requests.length,
+                separatorBuilder: (_, __) => const Divider(),
+                itemBuilder: (c, i) {
+                  final r = requests[i];
+                  return ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: Text(r.vehicleModel, style: const TextStyle(fontWeight: FontWeight.bold)),
+                    subtitle: Text('Biển số: ${r.vehiclePlate} · Mực nước: ${r.waterCm}cm'),
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      _showSOSDetail(r);
+                    },
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 

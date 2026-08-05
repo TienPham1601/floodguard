@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:intl/intl.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
+// Removed unused: import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:share_plus/share_plus.dart';
 import '../../theme.dart';
@@ -54,28 +54,39 @@ class _List extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return StreamBuilder<List<SOSRequest>>(
-      stream: FirebaseService.streamActiveSOS(),
+      stream: FirebaseService.streamActiveSOS(isRescuer: true), // SỬA: Phải truyền isRescuer: true
       builder: (context, snapshot) {
         if (snapshot.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator());
         
         var list = snapshot.data ?? [];
+        final user = FirebaseAuth.instance.currentUser;
+        debugPrint('RESCUE_LIST: Snapshot received. Total count=${list.length}');
         
         if (status == 'pending') {
-          list = list.where((r) => r.status == 'pending').toList();
+          list = list.where((r) => r.status == 'pending' || r.status == 'expanded').toList();
         } else {
-          list = list.where((r) => (r.status == 'accepted' || r.status == 'processing') && r.rescuerId == FirebaseAuth.instance.currentUser?.uid).toList();
+          list = list.where((r) => (r.status == 'accepted' || r.status == 'processing') && r.rescuerId == user?.uid).toList();
         }
 
-        list = list.where((r) {
-          final d = Geolocator.distanceBetween(myPos.latitude, myPos.longitude, r.latitude, r.longitude) / 1000;
-          return d <= radius;
-        }).toList();
+        // --- LỌC BÁN KÍNH AN TOÀN ---
+        bool isPosAvailable = myPos.latitude != 0 && myPos.longitude != 0;
+        if (isPosAvailable) {
+          list = list.where((r) {
+            final d = Geolocator.distanceBetween(myPos.latitude, myPos.longitude, r.latitude, r.longitude) / 1000;
+            debugPrint('RESCUE_LIST: Dist to ${r.id} = ${d.toStringAsFixed(1)}km (Limit: ${radius}km)');
+            return d <= radius;
+          }).toList();
+        }
 
         if (list.isEmpty) {
           return Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
             Icon(Icons.inbox_outlined, size: 48, color: Colors.grey.shade300),
             const SizedBox(height: 12),
-            Text(status == 'pending' ? 'Không có yêu cầu mới trong khu vực.' : 'Bạn chưa có đơn nào đang xử lý.', style: const TextStyle(color: Colors.grey)),
+            Text(status == 'pending' ? 'Không có yêu cầu mới.' : 'Bạn chưa có đơn nào đang xử lý.', style: const TextStyle(color: Colors.grey)),
+            if (!isPosAvailable && status == 'pending')
+               const Padding(padding: EdgeInsets.all(16), child: Text('Chưa lấy được vị trí GPS. Hiển thị mọi yêu cầu.', style: TextStyle(color: Colors.orange, fontSize: 12))),
+            if (isPosAvailable && status == 'pending')
+               Text('Phạm vi: ${radius.toStringAsFixed(0)}km', style: const TextStyle(color: Colors.grey, fontSize: 12)),
           ]));
         }
 

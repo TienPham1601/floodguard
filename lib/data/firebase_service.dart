@@ -92,6 +92,14 @@ class SOSRequest {
   final DateTime createdAt;
   final String? rescuerId;
   final String? garageName;
+  final String? requesterName;
+  final String? requesterPhone;
+  
+  // Thông tin thiết bị ESP32 (nếu có)
+  final bool? powerCut;
+  final bool? intakeClosed;
+  final bool? personInside;
+  final double? waterRisingSpeed;
 
   SOSRequest({
     required this.id,
@@ -106,6 +114,12 @@ class SOSRequest {
     required this.createdAt,
     this.rescuerId,
     this.garageName,
+    this.requesterName,
+    this.requesterPhone,
+    this.powerCut,
+    this.intakeClosed,
+    this.personInside,
+    this.waterRisingSpeed,
   });
 
   factory SOSRequest.fromFirestore(DocumentSnapshot doc) {
@@ -123,6 +137,12 @@ class SOSRequest {
       createdAt: (data['createdAt'] as Timestamp?)?.toDate() ?? DateTime.now(),
       rescuerId: data['rescuerId'],
       garageName: data['garageName'],
+      requesterName: data['requesterName'],
+      requesterPhone: data['requesterPhone'],
+      powerCut: data['powerCut'],
+      intakeClosed: data['intakeClosed'],
+      personInside: data['personInside'],
+      waterRisingSpeed: (data['waterRisingSpeed'] as num?)?.toDouble(),
     );
   }
 }
@@ -362,7 +382,38 @@ class FirebaseService {
   }
 
   static Future<void> acceptSOS(String id, String rid, String gname) async {
-    await db.collection('sos_requests').doc(id).update({'status': 'accepted', 'rescuerId': rid, 'garageName': gname});
+    final user = auth.currentUser;
+    if (user == null) return;
+    
+    final prof = await getUserProfile();
+    final String rName = prof?['name'] ?? 'Thợ cứu hộ';
+
+    return db.runTransaction((transaction) async {
+      final docRef = db.collection('sos_requests').doc(id);
+      final snapshot = await transaction.get(docRef);
+
+      if (!snapshot.exists) throw 'Yêu cầu không tồn tại.';
+      
+      final currentStatus = snapshot.data()?['status'];
+      if (currentStatus != 'pending' && currentStatus != 'expanded') {
+        throw 'ALREADY_TAKEN';
+      }
+
+      transaction.update(docRef, {
+        'status': 'accepted',
+        'rescuerId': rid,
+        'rescuerName': rName,
+        'garageName': gname,
+        'acceptedAt': FieldValue.serverTimestamp(),
+      });
+    });
+  }
+
+  static Stream<SOSRequest?> streamSOSDetail(String id) {
+    return db.collection('sos_requests').doc(id).snapshots().map((doc) {
+      if (!doc.exists) return null;
+      return SOSRequest.fromFirestore(doc);
+    });
   }
 
   static Future<void> updateSOSStatus(String id, String status) async {

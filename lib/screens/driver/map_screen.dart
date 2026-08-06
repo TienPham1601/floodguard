@@ -4,6 +4,7 @@ import 'package:latlong2/latlong.dart';
 import '../../theme.dart';
 import '../../ui.dart';
 import '../../widgets/app_map.dart';
+import '../../data/directions.dart';
 import '../../data/places.dart';
 import '../../data/location_service.dart';
 

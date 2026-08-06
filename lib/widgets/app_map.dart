@@ -3,7 +3,7 @@ import 'dart:convert';
 import 'dart:ui';
 import 'dart:math';
 import 'package:flutter/material.dart';
-import 'package:flutter_map/flutter_map.dart';
+import 'package:flutter_map/flutter_map.dart' as fm;
 import 'package:flutter_map_cancellable_tile_provider/flutter_map_cancellable_tile_provider.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:geolocator/geolocator.dart';
@@ -18,16 +18,11 @@ import '../data/prediction_service.dart';
 import '../data/directions.dart';
 import '../data/places.dart';
 import '../screens/driver/flood_report_screen.dart';
-
-class MapTarget {
-  final String name, subtitle;
-  final LatLng pos;
-  const MapTarget({required this.name, required this.subtitle, required this.pos});
-}
+import '../screens/rescue/request_detail_screen.dart';
 
 class AppMap extends StatefulWidget {
   final LatLng center;
-  final List<Marker> markers;
+  final List<fm.Marker> markers;
   final MapTarget? target;
   final VoidCallback? onClearTarget;
   final Widget? topOverlay;
@@ -54,7 +49,7 @@ class AppMap extends StatefulWidget {
 }
 
 class AppMapState extends State<AppMap> {
-  final MapController _mapController = MapController();
+  final fm.MapController _mapController = fm.MapController();
   final FlutterTts _tts = FlutterTts();
   
   LatLng? _currentPos;
@@ -81,6 +76,7 @@ class AppMapState extends State<AppMap> {
     super.initState();
     _initMap();
     _tts.setLanguage("vi-VN");
+    ORSNavigation.target.addListener(_onExternalNavigationRequest);
   }
 
   @override
@@ -88,14 +84,21 @@ class AppMapState extends State<AppMap> {
     _debounceTimer?.cancel();
     _positionStream?.cancel();
     _tts.stop();
+    ORSNavigation.target.removeListener(_onExternalNavigationRequest);
     super.dispose();
+  }
+
+  void _onExternalNavigationRequest() {
+    if (mounted && ORSNavigation.target.value != null) {
+      _loadSmartRoute();
+    }
   }
 
   @override
   void didUpdateWidget(AppMap oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (widget.target == null && oldWidget.target != null) _clearRoute();
-    if (widget.target?.pos != oldWidget.target?.pos && widget.target != null) {
+    if (widget.target != null && (oldWidget.target == null || widget.target?.pos != oldWidget.target?.pos)) {
       _isNavigating = false;
       _loadSmartRoute();
     }
@@ -120,7 +123,7 @@ class AppMapState extends State<AppMap> {
     }
   }
 
-  void _onCameraChange(MapCamera camera, bool hasGesture) {
+  void _onCameraChange(fm.MapCamera camera, bool hasGesture) {
     if (hasGesture) {
       _debounceTimer?.cancel();
       _debounceTimer = Timer(const Duration(milliseconds: 700), () => _updateRiskZones());
@@ -139,16 +142,36 @@ class AppMapState extends State<AppMap> {
   }
 
   Future<void> _loadSmartRoute() async {
-    if (widget.target == null || _currentPos == null) return;
+    final MapTarget? currentTarget = widget.target ?? ORSNavigation.target.value;
+    if (currentTarget == null || _currentPos == null) {
+      debugPrint('APP_MAP_NAV: target=$currentTarget, currentPos=$_currentPos. Aborting.');
+      return;
+    }
+    
+    debugPrint('APP_MAP_NAV: bat dau - To: ${currentTarget.pos.latitude}, ${currentTarget.pos.longitude}');
+    
     setState(() => _loadingRoute = true);
-    final List<List<LatLng>> avoidPolys = _riskZones.where((z) => z.riskLevel > 0.65).map((z) {
-      const d = 0.0018;
-      return [LatLng(z.center.latitude - d, z.center.longitude - d), LatLng(z.center.latitude + d, z.center.longitude - d), LatLng(z.center.latitude + d, z.center.longitude + d), LatLng(z.center.latitude - d, z.center.longitude + d), LatLng(z.center.latitude - d, z.center.longitude - d)];
-    }).toList();
-    final route = await RoutingService.fetchRoute(_currentPos!, widget.target!.pos, avoidPolygons: avoidPolys);
-    if (mounted) {
-      setState(() { _currentRoute = route; _loadingRoute = false; _currentStepIdx = 0; });
-      if (route != null) _fitBounds(route.points);
+    try {
+      final List<List<LatLng>> avoidPolys = _riskZones.where((z) => z.riskLevel > 0.65).map((z) {
+        const d = 0.0018;
+        return [LatLng(z.center.latitude - d, z.center.longitude - d), LatLng(z.center.latitude + d, z.center.longitude - d), LatLng(z.center.latitude + d, z.center.longitude + d), LatLng(z.center.latitude - d, z.center.longitude + d), LatLng(z.center.latitude - d, z.center.longitude - d)];
+      }).toList();
+      
+      final route = await RoutingService.fetchRoute(_currentPos!, currentTarget.pos, avoidPolygons: avoidPolys);
+      if (mounted) {
+        setState(() { _currentRoute = route; _loadingRoute = false; _currentStepIdx = 0; });
+        if (route != null) {
+          debugPrint('APP_MAP_NAV: Fetch success - points=${route.points.length}, dist=${route.distanceText}');
+          _fitBounds(route.points);
+          if (widget.isRescuerMode) _startNavigation();
+        } else {
+          debugPrint('APP_MAP_NAV: Fetch failed (null route)');
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Không thể tìm thấy tuyến đường an toàn.')));
+        }
+      }
+    } catch (e) {
+      debugPrint('APP_MAP_NAV: ERROR - $e');
+      if (mounted) setState(() => _loadingRoute = false);
     }
   }
 
@@ -158,11 +181,45 @@ class AppMapState extends State<AppMap> {
     _positionStream = Geolocator.getPositionStream(locationSettings: const LocationSettings(accuracy: LocationAccuracy.high, distanceFilter: 5)).listen((p) {
       if (!mounted) return;
       final latlng = LatLng(p.latitude, p.longitude);
+      
+      if (_currentRoute != null) {
+        final nearest = _getNearestPointOnRoute(latlng, _currentRoute!.points);
+        final dist = Geolocator.distanceBetween(latlng.latitude, latlng.longitude, nearest.latitude, nearest.longitude);
+        if (dist > 50) {
+          debugPrint('APP_MAP: Off-route ($dist m), rerouting...');
+          _loadSmartRoute();
+        }
+      }
+
       setState(() { _currentPos = latlng; _currentHeading = p.heading; _currentSpeed = p.speed * 3.6; });
       _mapController.rotate(360 - p.heading);
-      _mapController.move(latlng, 17.5);
+      _mapController.move(latlng, 18.0);
       _updateNav(latlng);
+
+      if (widget.isRescuerMode) {
+        _updateRescuerGPSInFirestore(latlng);
+      }
     });
+  }
+
+  LatLng _getNearestPointOnRoute(LatLng p, List<LatLng> route) {
+    if (route.isEmpty) return p;
+    LatLng best = route.first;
+    double minD = double.infinity;
+    for (var pt in route) {
+      final d = Geolocator.distanceBetween(p.latitude, p.longitude, pt.latitude, pt.longitude);
+      if (d < minD) { minD = d; best = pt; }
+    }
+    return best;
+  }
+
+  void _updateRescuerGPSInFirestore(LatLng pos) async {
+    final user = FirebaseService.auth.currentUser;
+    if (user == null) return;
+    final snap = await FirebaseService.db.collection('sos_requests').where('rescuerId', isEqualTo: user.uid).where('status', whereIn: ['accepted', 'processing', 'arrived']).limit(1).get();
+    if (snap.docs.isNotEmpty) {
+      FirebaseService.updateRescuerLocation(snap.docs.first.id, pos.latitude, pos.longitude);
+    }
   }
 
   void _updateNav(LatLng p) {
@@ -179,7 +236,7 @@ class AppMapState extends State<AppMap> {
 
   void _fitBounds(List<LatLng> points) {
     if (points.isEmpty) return;
-    _mapController.fitCamera(CameraFit.bounds(bounds: LatLngBounds.fromPoints(points), padding: const EdgeInsets.all(85)));
+    _mapController.fitCamera(fm.CameraFit.bounds(bounds: fm.LatLngBounds.fromPoints(points), padding: const EdgeInsets.all(85)));
   }
 
   void moveTo(LatLng p, {double zoom = 15}) => _mapController.move(p, zoom);
@@ -188,61 +245,42 @@ class AppMapState extends State<AppMap> {
   Widget build(BuildContext context) {
     return Stack(
       children: [
-        FlutterMap(
+        fm.FlutterMap(
           mapController: _mapController,
-          options: MapOptions(
+          options: fm.MapOptions(
             initialCenter: widget.center,
             initialZoom: 14.5,
             onPositionChanged: (pos, hasGesture) => _onCameraChange(_mapController.camera, hasGesture),
           ),
           children: [
-            TileLayer(urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png', userAgentPackageName: 'com.example.newcar', tileProvider: CancellableNetworkTileProvider()),
-            CircleLayer(
+            fm.TileLayer(urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png', userAgentPackageName: 'com.example.newcar', tileProvider: CancellableNetworkTileProvider()),
+            fm.CircleLayer(
               circles: _riskZones.map((z) {
                 final Color baseColor = z.riskLevel > 0.7 ? Colors.red : (z.riskLevel > 0.5 ? Colors.orange : Colors.yellow);
-                return CircleMarker(
-                  point: z.center,
-                  radius: 120, 
-                  useRadiusInMeter: true,
-                  color: baseColor.withValues(alpha: 0.2),
-                  borderColor: baseColor.withValues(alpha: 0.05),
-                  borderStrokeWidth: 50,
-                );
+                return fm.CircleMarker(point: z.center, radius: 120, useRadiusInMeter: true, color: baseColor.withValues(alpha: 0.2), borderColor: baseColor.withValues(alpha: 0.05), borderStrokeWidth: 50);
               }).toList(),
             ),
             StreamBuilder<List<SOSRequest>>(
               stream: FirebaseService.streamActiveSOS(isRescuer: widget.isRescuerMode),
               builder: (c, snap) {
                 final requests = snap.data ?? [];
-                // LOG KIỂM CHỨNG (BƯỚC 1)
                 debugPrint('MAP_SOS_DEBUG: requests.length=${requests.length}');
-                for (var r in requests) {
-                  debugPrint('MAP_SOS_DEBUG: id=${r.id}, status=${r.status}, pos=${r.latitude},${r.longitude}');
-                }
                 
-                // --- NHÓM CỤM MARKER SOS (CHỐNG CHỒNG CHÉO) ---
                 final List<List<SOSRequest>> clusters = [];
-                const double clusterDistanceThreshold = 0.0005; // ~50m
-
+                const double clusterDistanceThreshold = 0.0005;
                 for (var r in requests) {
                   bool added = false;
                   for (var cluster in clusters) {
                     final first = cluster.first;
                     final dist = sqrt(pow(r.latitude - first.latitude, 2) + pow(r.longitude - first.longitude, 2));
-                    if (dist < clusterDistanceThreshold) {
-                      cluster.add(r);
-                      added = true;
-                      break;
-                    }
+                    if (dist < clusterDistanceThreshold) { cluster.add(r); added = true; break; }
                   }
                   if (!added) clusters.add([r]);
                 }
-
-                return MarkerLayer(markers: clusters.map((cluster) {
+                return fm.MarkerLayer(markers: clusters.map((cluster) {
                   final r = cluster.first;
                   final count = cluster.length;
-
-                  return Marker(
+                  return fm.Marker(
                     point: LatLng(r.latitude, r.longitude),
                     width: 60, height: 60,
                     child: GestureDetector(
@@ -250,29 +288,8 @@ class AppMapState extends State<AppMap> {
                       child: Stack(
                         alignment: Alignment.center,
                         children: [
-                          // 1. RIPPLE EFFECT (DƯỚI CÙNG, LAN TỎA MƯỢT - SỬA LỖI d)
-                          IgnorePointer(
-                            child: Container(
-                              width: 30, height: 30,
-                              decoration: BoxDecoration(shape: BoxShape.circle, border: Border.all(color: Colors.red.withValues(alpha: 0.3), width: 1.5)),
-                            ).animate(onPlay: (c) => c.repeat()).scale(begin: const Offset(1,1), end: const Offset(2.2, 2.2), duration: const Duration(seconds: 2), curve: Curves.easeOut).fade(begin: 0.5, end: 0, duration: const Duration(seconds: 2)),
-                          ),
-                          
-                          // 2. MAIN STATIC MARKER (TRÊN CÙNG, LUÔN HIỆN RÕ - SỬA LỖI b)
-                          Container(
-                            width: 44, height: 44,
-                            decoration: BoxDecoration(
-                              color: Colors.red.shade700, 
-                              shape: BoxShape.circle, 
-                              border: Border.all(color: Colors.white, width: 3), 
-                              boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 8, offset: Offset(0, 3))]
-                            ),
-                            child: Center(
-                              child: count > 1 
-                                ? Text('$count', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16))
-                                : const Icon(Icons.sos, color: Colors.white, size: 22),
-                            ),
-                          ),
+                          IgnorePointer(child: Container(width: 30, height: 30, decoration: BoxDecoration(shape: BoxShape.circle, border: Border.all(color: Colors.red.withValues(alpha: 0.3), width: 1.5))).animate(onPlay: (c) => c.repeat()).scale(begin: const Offset(1,1), end: const Offset(2.2, 2.2), duration: const Duration(seconds: 2), curve: Curves.easeOut).fade(begin: 0.5, end: 0, duration: const Duration(seconds: 2))),
+                          Container(width: 44, height: 44, decoration: BoxDecoration(color: Colors.red.shade700, shape: BoxShape.circle, border: Border.all(color: Colors.white, width: 3), boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 8, offset: Offset(0, 3))]), child: Center(child: count > 1 ? Text('$count', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16)) : const Icon(Icons.sos, color: Colors.white, size: 22))),
                         ],
                       ),
                     ),
@@ -284,233 +301,95 @@ class AppMapState extends State<AppMap> {
               stream: FirebaseService.streamFloodReports(),
               builder: (c, s) {
                 final reps = s.data ?? [];
-                return MarkerLayer(markers: reps.map((r) => Marker(
-                  point: LatLng(r.latitude, r.longitude),
-                  width: 48, height: 48,
-                  child: GestureDetector(
-                    onTap: () => _showFloodDetailPopup(r),
-                    child: Container(
-                      padding: const EdgeInsets.all(8),
-                      decoration: BoxDecoration(color: Colors.blue.shade600, shape: BoxShape.circle, border: Border.all(color: Colors.white, width: 2.5), boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 8)]),
-                      child: const Icon(Icons.camera_alt, color: Colors.white, size: 18),
-                    ),
-                  ),
-                )).toList());
+                return fm.MarkerLayer(markers: reps.map((r) => fm.Marker(point: LatLng(r.latitude, r.longitude), width: 48, height: 48, child: GestureDetector(onTap: () => _showFloodDetailPopup(r), child: Container(padding: const EdgeInsets.all(8), decoration: BoxDecoration(color: Colors.blue.shade600, shape: BoxShape.circle, border: Border.all(color: Colors.white, width: 2.5), boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 8)]), child: const Icon(Icons.camera_alt, color: Colors.white, size: 18))))).toList());
               },
             ),
-            if (_currentRoute != null) PolylineLayer(polylines: [Polyline(points: _currentRoute!.points, color: C.brand(context), strokeWidth: 5.5)]),
-            MarkerLayer(markers: [
-              if (_currentPos != null) Marker(point: _currentPos!, width: 55, height: 55, child: Transform.rotate(angle: _currentHeading * (pi/180), child: Icon(_isNavigating ? Icons.navigation : Icons.person_pin_circle, color: Colors.blue.shade700, size: 42))),
+            if (_currentRoute != null) fm.PolylineLayer(polylines: [fm.Polyline(points: _currentRoute!.points, color: C.brand(context), strokeWidth: 5.5)]),
+            fm.MarkerLayer(markers: [
+              if (_currentPos != null) fm.Marker(point: _currentPos!, width: 55, height: 55, child: Transform.rotate(angle: _currentHeading * (pi/180), child: Icon(_isNavigating ? Icons.navigation : Icons.person_pin_circle, color: Colors.blue.shade700, size: 42))),
               ...widget.markers,
             ]),
           ],
         ),
-
-        if (!_isNavigating && !widget.isSearchActive) AnimatedPositioned(
-          duration: const Duration(milliseconds: 300),
-          top: MediaQuery.of(context).padding.top + 75,
-          right: 16,
-          child: _modernWeatherChip().animate().fade(duration: const Duration(milliseconds: 400)).slideX(begin: 1.0, end: 0.0),
-        ),
-
+        if (!_isNavigating && !widget.isSearchActive) AnimatedPositioned(duration: const Duration(milliseconds: 300), top: MediaQuery.of(context).padding.top + 75, right: 16, child: _modernWeatherChip().animate().fade(duration: const Duration(milliseconds: 400)).slideX(begin: 1.0, end: 0.0)),
         if (widget.topOverlay != null && !_isNavigating) Positioned(left: 16, right: 16, top: MediaQuery.of(context).padding.top + 12, child: widget.topOverlay!),
         if (_isNavigating) Positioned(top: MediaQuery.of(context).padding.top + 10, left: 12, right: 12, child: _navHeader()),
-
-        Positioned(left: 16, bottom: widget.target != null ? 240 : 110, child: _modernLegend()),
-        Positioned(right: 16, bottom: widget.target != null ? 230 : 110, child: Column(children: [
+        Positioned(left: 16, bottom: widget.target != null || ORSNavigation.target.value != null ? 240 : 110, child: _modernLegend()),
+        Positioned(right: 16, bottom: widget.target != null || ORSNavigation.target.value != null ? 230 : 110, child: Column(children: [
           ...widget.sideButtons,
-          if (!widget.isRescuerMode)
-            MapFab(
-              icon: Icons.camera_alt, 
-              bg: C.brand(context), 
-              fg: Colors.white, 
-              onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const FloodReportScreen()))
-            ).animate().scale(delay: const Duration(milliseconds: 200)),
+          if (!widget.isRescuerMode) MapFab(icon: Icons.camera_alt, bg: C.brand(context), fg: Colors.white, onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const FloodReportScreen()))).animate().scale(delay: const Duration(milliseconds: 200)),
           MapFab(icon: Icons.my_location, bg: Colors.white, fg: C.brand(context), onTap: _initMap).animate().scale(delay: const Duration(milliseconds: 300)),
         ])),
-
         if (_isNavigating) Positioned(left: 20, bottom: 120, child: _modernSpeedo()),
-        if (widget.target != null && _currentRoute != null && !_isNavigating) Positioned(left: 16, right: 16, bottom: 24, child: _routeCard().animate().slideY(begin: 1.0, end: 0.0)),
+        if ((widget.target != null || ORSNavigation.target.value != null) && _currentRoute != null && !_isNavigating) Positioned(left: 16, right: 16, bottom: 24, child: _routeCard().animate().slideY(begin: 1.0, end: 0.0)),
         if (_loadingRoute) const Center(child: CircularProgressIndicator()),
       ],
     );
   }
 
   void _showSOSList(List<SOSRequest> requests) {
-    showModalBottomSheet(
-      context: context,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
-      builder: (ctx) => Container(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('Danh sách cứu hộ tại khu vực', style: T.title(ctx)),
-            const SizedBox(height: 16),
-            Flexible(
-              child: ListView.separated(
-                shrinkWrap: true,
-                itemCount: requests.length,
-                separatorBuilder: (_, __) => const Divider(),
-                itemBuilder: (c, i) {
-                  final r = requests[i];
-                  return ListTile(
-                    contentPadding: EdgeInsets.zero,
-                    title: Text(r.vehicleModel, style: const TextStyle(fontWeight: FontWeight.bold)),
-                    subtitle: Text('Biển số: ${r.vehiclePlate} · Mực nước: ${r.waterCm}cm'),
-                    trailing: const Icon(Icons.chevron_right),
-                    onTap: () {
-                      Navigator.pop(ctx);
-                      _showSOSDetail(r);
-                    },
-                  );
-                },
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
+    showModalBottomSheet(context: context, shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))), builder: (ctx) => Container(padding: const EdgeInsets.all(24), child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [Text('Danh sách cứu hộ tại khu vực', style: T.title(ctx)), const SizedBox(height: 16), Flexible(child: ListView.separated(shrinkWrap: true, itemCount: requests.length, separatorBuilder: (_, __) => const Divider(), itemBuilder: (c, i) { final r = requests[i]; return ListTile(contentPadding: EdgeInsets.zero, title: Text(r.vehicleModel, style: const TextStyle(fontWeight: FontWeight.bold)), subtitle: Text('Biển số: ${r.vehiclePlate} · Mực nước: ${r.waterCm}cm'), trailing: const Icon(Icons.chevron_right), onTap: () { Navigator.pop(ctx); _showSOSDetail(r); }); })), ])));
   }
 
-  void _showSOSDetail(SOSRequest r) {
+  void _showSOSDetail(SOSRequest r) async {
+    if (widget.isRescuerMode && _currentPos != null) {
+      ORSNavigation.target.value = MapTarget(name: r.vehiclePlate, subtitle: r.vehicleModel, pos: LatLng(r.latitude, r.longitude));
+    }
+    String distText = '...';
+    String timeText = '...';
+    if (_currentPos != null) {
+      final route = await RoutingService.fetchRoute(_currentPos!, LatLng(r.latitude, r.longitude));
+      if (route != null) { distText = route.distanceText; timeText = route.durationText; }
+    }
+    if (!mounted) return;
     showModalBottomSheet(
-      context: context,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
+      context: context, isScrollControlled: true, shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(28))),
       builder: (ctx) => Container(
-        padding: const EdgeInsets.all(28),
+        padding: const EdgeInsets.fromLTRB(28, 12, 28, 32),
         child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Row(children: [
-            StatusTag('Đang chờ cứu hộ', bg: Colors.red.shade50, fg: Colors.red),
-            const Spacer(),
-            Text(DateFormat('HH:mm').format(r.createdAt), style: T.caption(ctx)),
-          ]),
+          Center(child: Container(width: 40, height: 4, decoration: BoxDecoration(color: Colors.grey.shade200, borderRadius: BorderRadius.circular(2)))),
+          const SizedBox(height: 24),
+          Row(children: [StatusTag(r.status == 'pending' ? 'Yêu cầu mới' : 'Đang xử lý', bg: r.status == 'pending' ? Colors.red.shade50 : Colors.blue.shade50, fg: r.status == 'pending' ? Colors.red : Colors.blue), const Spacer(), Text(DateFormat('HH:mm').format(r.createdAt), style: T.caption(ctx))]),
           const SizedBox(height: 20),
-          Text(r.vehicleModel, style: T.title(ctx).copyWith(fontSize: 22)),
-          Text('Biển số: ${r.vehiclePlate}', style: T.body(ctx)),
+          Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(r.vehicleModel, style: T.title(ctx).copyWith(fontSize: 22)), Text('Biển số: ${widget.isRescuerMode && r.status == 'pending' ? _maskPlate(r.vehiclePlate) : r.vehiclePlate}', style: T.body(ctx))])), Column(crossAxisAlignment: CrossAxisAlignment.end, children: [Text(distText, style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.blue, fontSize: 18)), Text('Dự kiến $timeText', style: T.caption(ctx))])]),
           const SizedBox(height: 12),
-          FutureBuilder<String>(
-            future: SearchService.reverseGeocode(r.latitude, r.longitude),
-            builder: (c, snap) => Text(snap.data ?? 'Đang tải vị trí...', style: T.small(ctx).copyWith(color: Colors.grey.shade600)),
-          ),
+          FutureBuilder<String>(future: SearchService.reverseGeocode(r.latitude, r.longitude), builder: (c, snap) => Text(snap.data ?? 'Đang tải vị trí...', style: T.small(ctx).copyWith(color: Colors.grey.shade600), maxLines: 2, overflow: TextOverflow.ellipsis)),
           const Divider(height: 40),
-          Text('Mực nước tại xe: ${r.waterCm}cm', style: T.body(ctx).copyWith(fontWeight: FontWeight.bold, color: Colors.red)),
+          Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text('Mực nước', style: T.caption(ctx)), Text('${r.waterCm}cm', style: T.h2(ctx).copyWith(color: Colors.red))]), AppButton('Xem chi tiết xe', full: false, tone: Tone.ghost, onTap: () { Navigator.pop(ctx); Navigator.push(context, MaterialPageRoute(builder: (_) => RequestDetailScreen(id: r.id))); })]),
           const SizedBox(height: 32),
-          if (widget.isRescuerMode) AppButton('Tiếp nhận cứu hộ', height: 56, onTap: () {
-            FirebaseService.acceptSOS(r.id, FirebaseService.auth.currentUser!.uid, 'Gara của bạn');
-            Navigator.pop(ctx);
-          }),
+          if (widget.isRescuerMode) ...[
+            if (r.status == 'pending' || r.status == 'expanded')
+              AppButton('TIẾP NHẬN CỨU HỘ', height: 58, onTap: () async {
+                try {
+                  final prof = await FirebaseService.getUserProfile();
+                  await FirebaseService.acceptSOS(r.id, FirebaseService.auth.currentUser!.uid, prof?['garageName'] ?? 'Gara của bạn');
+                  if (ctx.mounted) { Navigator.pop(ctx); _startNavigation(); }
+                } catch (e) { if (ctx.mounted) { Navigator.pop(ctx); ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Lỗi: $e'))); } }
+              })
+            else
+              AppButton('BẮT ĐẦU CHỈ ĐƯỜNG', height: 58, icon: Icons.navigation, onTap: () { Navigator.pop(ctx); _startNavigation(); }),
+          ],
         ]),
       ),
     );
   }
+
+  String _maskPlate(String p) => p.length > 3 ? '${p.substring(0,3)}-***.**' : p;
 
   void _showFloodDetailPopup(FloodReport r) {
     final expiryHours = 8 - DateTime.now().difference(r.reportedAt).inHours;
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (ctx) => Container(
-        padding: const EdgeInsets.all(28),
-        decoration: const BoxDecoration(color: Colors.white, borderRadius: BorderRadius.vertical(top: Radius.circular(28))),
-        child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Row(children: [
-            StatusTag(r.source == 'user' ? 'Người dùng báo' : 'Thiết bị cảm biến', bg: Colors.blue.shade50, fg: Colors.blue.shade700),
-            const Spacer(),
-            Text('Hết hạn sau ~$expiryHours giờ', style: T.caption(ctx).copyWith(color: Colors.orange.shade700, fontWeight: FontWeight.bold)),
-          ]),
-          const SizedBox(height: 20),
-          if (r.photoThumb != null) ClipRRect(borderRadius: BorderRadius.circular(20), child: Image.memory(base64Decode(r.photoThumb!), width: double.infinity, height: 200, fit: BoxFit.cover)),
-          const SizedBox(height: 20),
-          FutureBuilder<String>(
-            future: SearchService.reverseGeocode(r.latitude, r.longitude),
-            builder: (c, snap) => Text(snap.data ?? 'Đang tải...', style: T.body(ctx).copyWith(fontWeight: FontWeight.bold)),
-          ),
-          const Divider(height: 40),
-          Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-            Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text('Mực nước', style: T.caption(ctx)),
-              Text('${r.waterCm} cm', style: T.h2(ctx).copyWith(color: C.brand(ctx), fontSize: 32)),
-            ]),
-            Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
-              Text('Báo cáo lúc', style: T.caption(ctx)),
-              Text(DateFormat('HH:mm, dd/MM').format(r.reportedAt), style: T.body(ctx)),
-            ]),
-          ]),
-          if (r.description != null && r.description!.isNotEmpty) ...[
-            const SizedBox(height: 16),
-            Text(r.description!, style: T.body(ctx).copyWith(fontStyle: FontStyle.italic, color: Colors.grey.shade700)),
-          ],
-          const SizedBox(height: 32),
-          AppButton('Đóng', tone: Tone.ghost, height: 52, onTap: () => Navigator.pop(ctx)),
-        ]),
-      ),
-    );
+    showModalBottomSheet(context: context, isScrollControlled: true, backgroundColor: Colors.transparent, builder: (ctx) => Container(padding: const EdgeInsets.all(28), decoration: const BoxDecoration(color: Colors.white, borderRadius: BorderRadius.vertical(top: Radius.circular(28))), child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [Row(children: [StatusTag(r.source == 'user' ? 'Người dùng báo' : 'Thiết bị cảm biến', bg: Colors.blue.shade50, fg: Colors.blue.shade700), const Spacer(), Text('Hết hạn sau ~$expiryHours giờ', style: T.caption(ctx).copyWith(color: Colors.orange.shade700, fontWeight: FontWeight.bold))]), const SizedBox(height: 20), if (r.photoThumb != null) ClipRRect(borderRadius: BorderRadius.circular(20), child: Image.memory(base64Decode(r.photoThumb!), width: double.infinity, height: 200, fit: BoxFit.cover)), const SizedBox(height: 20), FutureBuilder<String>(future: SearchService.reverseGeocode(r.latitude, r.longitude), builder: (c, snap) => Text(snap.data ?? 'Đang tải...', style: T.body(ctx).copyWith(fontWeight: FontWeight.bold))), const Divider(height: 40), Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text('Mực nước', style: T.caption(ctx)), Text('${r.waterCm} cm', style: T.h2(ctx).copyWith(color: C.brand(ctx), fontSize: 32))]), Column(crossAxisAlignment: CrossAxisAlignment.end, children: [Text('Báo cáo lúc', style: T.caption(ctx)), Text(DateFormat('HH:mm, dd/MM').format(r.reportedAt), style: T.body(ctx))])]), if (r.description != null && r.description!.isNotEmpty) ...[const SizedBox(height: 16), Text(r.description!, style: T.body(ctx).copyWith(fontStyle: FontStyle.italic, color: Colors.grey.shade700))], const SizedBox(height: 32), AppButton('Đóng', tone: Tone.ghost, height: 52, onTap: () => Navigator.pop(ctx))])));
   }
 
   Widget _modernWeatherChip() {
     if (_weather == null) return const SizedBox();
     final isDanger = _weather!.prob > 65;
     final color = isDanger ? Colors.orange.shade800 : Colors.blue.shade600;
-    return GestureDetector(
-      onTap: () => _showWeatherPanel(),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(20),
-        child: BackdropFilter(
-          filter: ImageFilter.blur(sigmaX: 8, sigmaY: 8),
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-            decoration: BoxDecoration(
-              gradient: LinearGradient(colors: [color.withValues(alpha: 0.85), color.withValues(alpha: 0.7)], begin: Alignment.topLeft, end: Alignment.bottomRight),
-              borderRadius: BorderRadius.circular(20),
-              border: Border.all(color: Colors.white.withValues(alpha: 0.3)),
-            ),
-            child: Row(children: [
-              Icon(isDanger ? Icons.thunderstorm : Icons.cloud, color: Colors.white, size: 20),
-              const SizedBox(width: 10),
-              Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
-                Text('${_weather!.temp.toStringAsFixed(1)}°C', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 15, height: 1.1)),
-                Text('Mưa ${_weather!.prob.toStringAsFixed(0)}%', style: TextStyle(color: Colors.white.withValues(alpha: 0.9), fontSize: 11)),
-              ]),
-            ]),
-          ),
-        ),
-      ),
-    );
+    return GestureDetector(onTap: () => _showWeatherPanel(), child: ClipRRect(borderRadius: BorderRadius.circular(20), child: BackdropFilter(filter: ImageFilter.blur(sigmaX: 8, sigmaY: 8), child: Container(padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10), decoration: BoxDecoration(gradient: LinearGradient(colors: [color.withValues(alpha: 0.85), color.withValues(alpha: 0.7)], begin: Alignment.topLeft, end: Alignment.bottomRight), borderRadius: BorderRadius.circular(20), border: Border.all(color: Colors.white.withValues(alpha: 0.3))), child: Row(children: [Icon(isDanger ? Icons.thunderstorm : Icons.cloud, color: Colors.white, size: 20), const SizedBox(width: 10), Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [Text('${_weather!.temp.toStringAsFixed(1)}°C', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 15, height: 1.1)), Text('Mưa ${_weather!.prob.toStringAsFixed(0)}%', style: TextStyle(color: Colors.white.withValues(alpha: 0.9), fontSize: 11))])])))));
   }
 
   void _showWeatherPanel() {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: Colors.transparent,
-      builder: (ctx) => Container(
-        padding: const EdgeInsets.all(28),
-        decoration: const BoxDecoration(color: Colors.white, borderRadius: BorderRadius.vertical(top: Radius.circular(32))),
-        child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Row(children: [
-            Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text('Thời tiết & Địa hình', style: T.title(ctx)),
-              Text(_weather!.summary, style: T.caption(ctx).copyWith(color: Colors.blue.shade700, fontWeight: FontWeight.bold)),
-            ])),
-            Container(padding: const EdgeInsets.all(10), decoration: BoxDecoration(color: Colors.blue.shade50, borderRadius: BorderRadius.circular(14)), child: Icon(Icons.wb_sunny_outlined, color: Colors.blue.shade700, size: 24)),
-          ]),
-          const SizedBox(height: 24),
-          Row(children: [
-            _statItem(Icons.thermostat, 'Nhiệt độ', '${_weather!.temp.toStringAsFixed(1)}°C'),
-            _statItem(Icons.terrain, 'Độ cao', '${_weather!.elevation.toStringAsFixed(0)}m'),
-            _statItem(Icons.water_drop, 'Xác suất', '${_weather!.prob.toStringAsFixed(0)}%'),
-          ]),
-          const SizedBox(height: 32),
-          Text('Dự báo lượng mưa 6h tới (mm)', style: T.small(ctx).copyWith(fontWeight: FontWeight.bold)),
-          const SizedBox(height: 20),
-          _rainChart(),
-          const SizedBox(height: 32),
-          AppButton('Đóng', tone: Tone.ghost, height: 52, onTap: () => Navigator.pop(ctx)),
-        ]),
-      ),
-    );
+    showModalBottomSheet(context: context, backgroundColor: Colors.transparent, builder: (ctx) => Container(padding: const EdgeInsets.all(28), decoration: const BoxDecoration(color: Colors.white, borderRadius: BorderRadius.vertical(top: Radius.circular(32))), child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [Row(children: [Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text('Thời tiết & Địa hình', style: T.title(ctx)), Text(_weather!.summary, style: T.caption(ctx).copyWith(color: Colors.blue.shade700, fontWeight: FontWeight.bold))])), Container(padding: const EdgeInsets.all(10), decoration: BoxDecoration(color: Colors.blue.shade50, borderRadius: BorderRadius.circular(14)), child: Icon(Icons.wb_sunny_outlined, color: Colors.blue.shade700, size: 24))]), const SizedBox(height: 24), Row(children: [_statItem(Icons.thermostat, 'Nhiệt độ', '${_weather!.temp.toStringAsFixed(1)}°C'), _statItem(Icons.terrain, 'Độ cao', '${_weather!.elevation.toStringAsFixed(0)}m'), _statItem(Icons.water_drop, 'Xác suất', '${_weather!.prob.toStringAsFixed(0)}%')]), const SizedBox(height: 32), Text('Dự báo lượng mưa 6h tới (mm)', style: T.small(ctx).copyWith(fontWeight: FontWeight.bold)), const SizedBox(height: 20), _rainChart(), const SizedBox(height: 32), AppButton('Đóng', tone: Tone.ghost, height: 52, onTap: () => Navigator.pop(ctx))])));
   }
 
   Widget _statItem(IconData i, String k, String v) => Expanded(child: Column(children: [Icon(i, size: 24, color: Colors.blue), const SizedBox(height: 6), Text(k, style: const TextStyle(fontSize: 10, color: Colors.grey)), Text(v, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14))]));
@@ -518,111 +397,29 @@ class AppMapState extends State<AppMap> {
   Widget _rainChart() {
     final maxRain = _weather!.hourly.isEmpty ? 1.0 : _weather!.hourly.map((e) => e.amount).reduce((a, b) => a > b ? a : b);
     final chartMax = maxRain < 5 ? 5.0 : maxRain;
-    return SizedBox(
-      height: 100,
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.end,
-        children: _weather!.hourly.map((h) {
-          final barHeight = (h.amount / chartMax * 80).clamp(4.0, 80.0);
-          final color = h.amount > 10 ? Colors.red : (h.amount > 2 ? Colors.orange : Colors.blue.shade300);
-          return Expanded(child: Column(mainAxisAlignment: MainAxisAlignment.end, children: [
-            Text('${h.amount.toStringAsFixed(1)}', style: const TextStyle(fontSize: 8, fontWeight: FontWeight.bold)),
-            const SizedBox(height: 2),
-            Container(width: 20, height: barHeight, decoration: BoxDecoration(color: color, borderRadius: const BorderRadius.vertical(top: Radius.circular(6)))),
-            const SizedBox(height: 4),
-            Text('${h.hour}h', style: const TextStyle(fontSize: 10, color: Colors.grey)),
-          ]));
-        }).toList(),
-      ),
-    );
+    return SizedBox(height: 100, child: Row(crossAxisAlignment: CrossAxisAlignment.end, children: _weather!.hourly.map((h) { final barHeight = (h.amount / chartMax * 80).clamp(4.0, 80.0); final color = h.amount > 10 ? Colors.red : (h.amount > 2 ? Colors.orange : Colors.blue.shade300); return Expanded(child: Column(mainAxisAlignment: MainAxisAlignment.end, children: [Text('${h.amount.toStringAsFixed(1)}', style: const TextStyle(fontSize: 8, fontWeight: FontWeight.bold)), const SizedBox(height: 2), Container(width: 20, height: barHeight, decoration: BoxDecoration(color: color, borderRadius: const BorderRadius.vertical(top: Radius.circular(6)))), const SizedBox(height: 4), Text('${h.hour}h', style: const TextStyle(fontSize: 10, color: Colors.grey))])); }).toList()));
   }
 
   Widget _modernLegend() {
-    return GestureDetector(
-      onTap: () => setState(() => _legendExpanded = !_legendExpanded),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(16),
-        child: BackdropFilter(
-          filter: ImageFilter.blur(sigmaX: 5, sigmaY: 5),
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 300),
-            padding: const EdgeInsets.all(12),
-            width: _legendExpanded ? 180 : 48,
-            decoration: BoxDecoration(color: Colors.white.withValues(alpha: 0.8), borderRadius: BorderRadius.circular(16), border: Border.all(color: Colors.white.withValues(alpha: 0.5))),
-            child: _legendExpanded ? Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
-              _legItem(Colors.red, 'Rủi ro cao'),
-              _legItem(Colors.orange, 'Rủi ro vừa'),
-              _legItem(Colors.yellow, 'Cảnh báo trũng'),
-              const Divider(height: 16),
-              _legItem(Colors.red, 'Yêu cầu SOS', isMarker: true),
-              _legItem(Colors.blue.shade700, 'Điểm ngập (ảnh)', isCamera: true),
-            ]) : Icon(Icons.layers_outlined, size: 24, color: Colors.grey.shade800),
-          ),
-        ),
-      ),
-    );
+    return GestureDetector(onTap: () => setState(() => _legendExpanded = !_legendExpanded), child: ClipRRect(borderRadius: BorderRadius.circular(16), child: BackdropFilter(filter: ImageFilter.blur(sigmaX: 5, sigmaY: 5), child: AnimatedContainer(duration: const Duration(milliseconds: 300), padding: const EdgeInsets.all(12), width: _legendExpanded ? 180 : 48, decoration: BoxDecoration(color: Colors.white.withValues(alpha: 0.8), borderRadius: BorderRadius.circular(16), border: Border.all(color: Colors.white.withValues(alpha: 0.5))), child: _legendExpanded ? Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [_legItem(Colors.red, 'Rủi ro cao'), _legItem(Colors.orange, 'Rủi ro vừa'), _legItem(Colors.yellow, 'Cảnh báo trũng'), const Divider(height: 16), _legItem(Colors.red, 'Yêu cầu SOS', isMarker: true), _legItem(Colors.blue.shade700, 'Điểm ngập (ảnh)', isCamera: true)]) : Icon(Icons.layers_outlined, size: 24, color: Colors.grey.shade800)))));
   }
 
-  Widget _legItem(Color c, String t, {bool isMarker = false, bool isCamera = false}) => Padding(
-    padding: const EdgeInsets.symmetric(vertical: 6), 
-    child: Row(children: [
-      Container(
-        width: 16, height: 16, 
-        decoration: BoxDecoration(
-          color: isMarker ? Colors.red : (isCamera ? Colors.blue.shade700 : c.withValues(alpha: 0.5)), 
-          shape: (isMarker || isCamera) ? BoxShape.circle : BoxShape.rectangle,
-          borderRadius: (isMarker || isCamera) ? null : BorderRadius.circular(4),
-          border: Border.all(color: (isMarker || isCamera) ? Colors.white : c, width: (isMarker || isCamera) ? 2 : 1),
-        ),
-        child: isCamera ? const Icon(Icons.camera_alt, size: 10, color: Colors.white) : null,
-      ), 
-      const SizedBox(width: 10), 
-      Text(t, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600))
-    ])
-  );
+  Widget _legItem(Color c, String t, {bool isMarker = false, bool isCamera = false}) => Padding(padding: const EdgeInsets.symmetric(vertical: 6), child: Row(children: [Container(width: 16, height: 16, decoration: BoxDecoration(color: isMarker ? Colors.red : (isCamera ? Colors.blue.shade700 : c.withValues(alpha: 0.5)), shape: (isMarker || isCamera) ? BoxShape.circle : BoxShape.rectangle, borderRadius: (isMarker || isCamera) ? null : BorderRadius.circular(4), border: Border.all(color: (isMarker || isCamera) ? Colors.white : c, width: (isMarker || isCamera) ? 2 : 1)), child: isCamera ? const Icon(Icons.camera_alt, size: 10, color: Colors.white) : null), const SizedBox(width: 10), Text(t, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600))]));
 
   Widget _navHeader() {
-    return Container(
-      padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(gradient: LinearGradient(colors: [C.brand(context), C.brand(context).withValues(alpha: 0.8)]), borderRadius: BorderRadius.circular(20), boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 15, offset: Offset(0, 6))]),
-      child: Row(children: [
-        const Icon(Icons.navigation, color: Colors.white, size: 32),
-        const SizedBox(width: 14),
-        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text(_nextInstruction.isEmpty ? "Dẫn đường an toàn..." : _nextInstruction, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 17)),
-          Text('${_currentRoute!.distanceText} · ${_currentRoute!.durationText}', style: TextStyle(color: Colors.white.withValues(alpha: 0.8), fontSize: 13)),
-        ])),
-        IconButton(icon: const Icon(Icons.check_circle, color: Colors.white, size: 28), onPressed: _clearRoute),
-      ]),
-    );
+    final MapTarget? currentTarget = widget.target ?? ORSNavigation.target.value;
+    return Container(padding: const EdgeInsets.all(20), decoration: BoxDecoration(gradient: LinearGradient(colors: [C.brand(context), C.brand(context).withValues(alpha: 0.8)]), borderRadius: BorderRadius.circular(20), boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 15, offset: Offset(0, 6))]), child: Row(children: [const Icon(Icons.navigation, color: Colors.white, size: 32), const SizedBox(width: 14), Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(_nextInstruction.isEmpty ? "Dẫn đường an toàn..." : _nextInstruction, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 17)), if (_currentRoute != null) Text('${_currentRoute!.distanceText} · ${_currentRoute!.durationText}', style: TextStyle(color: Colors.white.withValues(alpha: 0.8), fontSize: 13))])), IconButton(icon: const Icon(Icons.check_circle, color: Colors.white, size: 28), onPressed: _clearRoute)]));
   }
 
   Widget _modernSpeedo() {
-    return Container(
-      width: 80, height: 80,
-      decoration: BoxDecoration(color: Colors.white, shape: BoxShape.circle, border: Border.all(color: C.brand(context), width: 4), boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 10)]),
-      child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-        Text(_currentSpeed.round().toString(), style: T.h2(context).copyWith(fontSize: 28, height: 1)),
-        const Text('km/h', style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Colors.grey)),
-      ]),
-    );
+    return Container(width: 80, height: 80, decoration: BoxDecoration(color: Colors.white, shape: BoxShape.circle, border: Border.all(color: C.brand(context), width: 4), boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 10)]), child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [Text(_currentSpeed.round().toString(), style: T.h2(context).copyWith(fontSize: 28, height: 1)), const Text('km/h', style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Colors.grey))]));
   }
 
   Widget _routeCard() {
-    return AppCard(
-      padding: const EdgeInsets.all(20),
-      child: Column(mainAxisSize: MainAxisSize.min, children: [
-        Row(children: [Expanded(child: Text(widget.target!.name, style: T.title(context).copyWith(fontSize: 20), maxLines: 1, overflow: TextOverflow.ellipsis)), IconButton(icon: const Icon(Icons.close, size: 24), onPressed: widget.onClearTarget)]),
-        const SizedBox(height: 8),
-        Row(children: [
-          Icon(Icons.access_time, size: 16, color: Colors.blue.shade600), const SizedBox(width: 6), Text(_currentRoute!.durationText, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
-          const SizedBox(width: 20),
-          Icon(Icons.route_outlined, size: 16, color: Colors.grey), const SizedBox(width: 6), Text(_currentRoute!.distanceText, style: const TextStyle(fontSize: 15)),
-        ]),
-        const SizedBox(height: 24),
-        AppButton('Bắt đầu di chuyển', height: 56, onTap: () { _startNavigation(); }),
-      ]),
-    );
+    final MapTarget? target = widget.target ?? ORSNavigation.target.value;
+    if (target == null) return const SizedBox();
+    
+    return AppCard(padding: const EdgeInsets.all(20), child: Column(mainAxisSize: MainAxisSize.min, children: [Row(children: [Expanded(child: Text(target.name, style: T.title(context).copyWith(fontSize: 20), maxLines: 1, overflow: TextOverflow.ellipsis)), IconButton(icon: const Icon(Icons.close, size: 24), onPressed: () { _clearRoute(); if (widget.onClearTarget != null) widget.onClearTarget!(); ORSNavigation.target.value = null; })]), const SizedBox(height: 8), Row(children: [Icon(Icons.access_time, size: 16, color: Colors.blue.shade600), const SizedBox(width: 6), if (_currentRoute != null) Text(_currentRoute!.durationText, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)), const SizedBox(width: 20), Icon(Icons.route_outlined, size: 16, color: Colors.grey), const SizedBox(width: 6), if (_currentRoute != null) Text(_currentRoute!.distanceText, style: const TextStyle(fontSize: 15))]), const SizedBox(height: 24), AppButton('Bắt đầu di chuyển', height: 56, onTap: () { _startNavigation(); })]));
   }
 }
 

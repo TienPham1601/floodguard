@@ -4,8 +4,8 @@ import 'package:flutter_map/flutter_map.dart' as fm;
 import 'package:latlong2/latlong.dart';
 import 'package:geolocator/geolocator.dart';
 import '../../theme.dart';
-// Removed unused: import '../../ui.dart';
 import '../../data/firebase_service.dart';
+import '../../data/directions.dart';
 import '../../widgets/app_map.dart';
 import 'request_detail_screen.dart';
 
@@ -17,7 +17,6 @@ class RescueMapScreen extends StatefulWidget {
 
 class _RescueMapScreenState extends State<RescueMapScreen> {
   final _mapKey = GlobalKey<AppMapState>();
-  MapTarget? _target;
   LatLng _myPos = const LatLng(21.0285, 105.8542);
   double _radius = 15.0;
 
@@ -64,8 +63,10 @@ class _RescueMapScreenState extends State<RescueMapScreen> {
               child: const Icon(Icons.sos, color: Colors.red, size: 36),
             ),
           )).toList(),
-          target: _target,
-          onClearTarget: () => setState(() => _target = null),
+          onClearTarget: () {
+            ORSNavigation.target.value = null;
+          },
+          isRescuerMode: true,
           sideButtons: [
             MapFab(
               icon: Icons.my_location,

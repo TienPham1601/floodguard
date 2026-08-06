@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:developer' as dev;
+import 'package:flutter/foundation.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:http/http.dart' as http;
 import '../config/api_config.dart';
@@ -26,6 +27,16 @@ class FloodPoint {
 }
 
 final List<FloodPoint> floodPoints = [];
+
+class MapTarget {
+  final String name, subtitle;
+  final LatLng pos;
+  const MapTarget({required this.name, required this.subtitle, required this.pos});
+}
+
+class ORSNavigation {
+  static final ValueNotifier<MapTarget?> target = ValueNotifier(null);
+}
 
 class RouteResult {
   final List<LatLng> points;
@@ -71,9 +82,6 @@ class RoutingService {
     };
 
     dev.log('ORS_DEBUG: Fetching route from $origin to $destination');
-    if (avoidPolygons != null && avoidPolygons.isNotEmpty) {
-      dev.log('ORS_DEBUG: Avoiding ${avoidPolygons.length} polygons');
-    }
 
     try {
       final res = await http.post(
@@ -84,8 +92,6 @@ class RoutingService {
         },
         body: jsonEncode(body),
       ).timeout(const Duration(seconds: 12));
-
-      dev.log('ORS_DEBUG: Status ${res.statusCode}');
 
       if (res.statusCode == 200) {
         final data = jsonDecode(res.body);
@@ -107,7 +113,6 @@ class RoutingService {
         }
 
         final points = geometry.map((c) => LatLng(c[1], c[0])).toList();
-        dev.log('ORS_DEBUG: Success, drawn ${points.length} points');
 
         return RouteResult(
           points: points,
@@ -118,19 +123,11 @@ class RoutingService {
           steps: routeSteps,
           summary: '',
         );
-      } else {
-        dev.log('ORS_DEBUG: Error response: ${res.body}');
-        // Nếu lỗi do avoid_polygons quá lớn, thử lại không có avoid
-        if (avoidPolygons != null && avoidPolygons.isNotEmpty) {
-          dev.log('ORS_DEBUG: Retrying without avoid_polygons...');
-          return fetchRoute(origin, destination);
-        }
       }
     } catch (e) {
-      dev.log('ORS_DEBUG: Critical Error: $e');
+      dev.log('ORS_DEBUG: Error - $e');
     }
 
-    dev.log('ORS_DEBUG: Falling back to OSRM...');
     return _fetchFallbackOSRM(origin, destination);
   }
 

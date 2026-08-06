@@ -4,7 +4,6 @@ import 'package:intl/intl.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
-// Removed unused import: flutter_animate
 import '../../theme.dart';
 import '../../ui.dart';
 import '../../data/firebase_service.dart';
@@ -42,20 +41,20 @@ class _IncidentLogsScreenState extends State<IncidentLogsScreen> {
           return pw.Column(
             crossAxisAlignment: pw.CrossAxisAlignment.start,
             children: [
-              pw.Text('NHẬT KÝ SỰ CỐ AN TOÀN', style: pw.TextStyle(font: fontBold, fontSize: 24, color: PdfColors.blue900)),
+              pw.Text('NHẬT KÝ HOẠT ĐỘNG AN TOÀN', style: pw.TextStyle(font: fontBold, fontSize: 24, color: PdfColors.blue900)),
               pw.SizedBox(height: 8),
-              pw.Text('Hệ thống bảo vệ xe FloodGuard', style: pw.TextStyle(font: font, fontSize: 12, color: PdfColors.grey700)),
+              pw.Text('Hệ thống FloodGuard Safety System', style: pw.TextStyle(font: font, fontSize: 12, color: PdfColors.grey700)),
               pw.Divider(thickness: 2, color: PdfColors.blue800),
               pw.SizedBox(height: 20),
               
               pw.Row(mainAxisAlignment: pw.MainAxisAlignment.spaceBetween, children: [
                 pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
-                  pw.Text('THÔNG TIN PHƯƠNG TIỆN', style: pw.TextStyle(font: fontBold, fontSize: 10, color: PdfColors.grey600)),
+                  pw.Text('CHỦ PHƯƠNG TIỆN', style: pw.TextStyle(font: fontBold, fontSize: 10, color: PdfColors.grey600)),
                   pw.Text('Biển số: ${_vehicle?.plate ?? "---"}', style: pw.TextStyle(font: font, fontSize: 14)),
                   pw.Text('Dòng xe: ${_vehicle?.model ?? "---"}', style: pw.TextStyle(font: font, fontSize: 14)),
                 ]),
                 pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.end, children: [
-                  pw.Text('NGÀY XUẤT BÁO CÁO', style: pw.TextStyle(font: fontBold, fontSize: 10, color: PdfColors.grey600)),
+                  pw.Text('NGÀY TRÍCH XUẤT', style: pw.TextStyle(font: fontBold, fontSize: 10, color: PdfColors.grey600)),
                   pw.Text(DateFormat('dd/MM/yyyy').format(DateTime.now()), style: pw.TextStyle(font: font, fontSize: 14)),
                 ]),
               ]),
@@ -70,49 +69,65 @@ class _IncidentLogsScreenState extends State<IncidentLogsScreen> {
                 headers: ['Thời gian', 'Sự kiện', 'Chi tiết'],
                 data: logs.map((l) {
                   final d = l.data() as Map<String, dynamic>;
-                  final date = (d['time'] as Timestamp).toDate();
+                  final date = (d['timestamp'] as Timestamp?)?.toDate() ?? DateTime.now();
                   return [
                     DateFormat('dd/MM HH:mm').format(date),
-                    d['event'] ?? '',
-                    d['detail'] ?? '',
+                    _getEventName(d['status'] ?? ''),
+                    d['message'] ?? '',
                   ];
                 }).toList(),
               ),
               
               pw.Spacer(),
               pw.Divider(),
-              pw.Align(alignment: pw.Alignment.center, child: pw.Text('Báo cáo được trích xuất tự động từ hệ thống FloodGuard Safety.', style: pw.TextStyle(font: font, fontSize: 9, color: PdfColors.grey600))),
+              pw.Align(alignment: pw.Alignment.center, child: pw.Text('Báo cáo này có giá trị làm bằng chứng khi giám định bảo hiểm.', style: pw.TextStyle(font: font, fontSize: 9, color: PdfColors.grey600))),
             ],
           );
         },
       ),
     );
 
-    await Printing.sharePdf(bytes: await pdf.save(), filename: 'FloodGuard_Incident_Log_${_vehicle?.plate}.pdf');
+    await Printing.sharePdf(bytes: await pdf.save(), filename: 'FloodGuard_Log_${_vehicle?.plate}.pdf');
+  }
+
+  static String _getEventName(String status) {
+    switch (status) {
+      case 'pending': return 'Gửi yêu cầu SOS';
+      case 'accepted': return 'Tiếp nhận cứu hộ';
+      case 'processing': return 'Đang di chuyển';
+      case 'arrived': return 'Đã tới hiện trường';
+      case 'done': return 'Hoàn tất cứu hộ';
+      case 'timeout': return 'Yêu cầu hết hạn';
+      case 'cancelled': return 'Hủy yêu cầu';
+      case 'report': return 'Báo cáo điểm ngập';
+      default: return 'Hoạt động';
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    if (_vehicle == null) return const Scaffold(body: Center(child: CircularProgressIndicator()));
-
     return Scaffold(
       backgroundColor: C.bg(context),
-      appBar: topBar(context, 'Nhật ký sự cố', left: IconButton(icon: const Icon(Icons.arrow_back), onPressed: () => Navigator.pop(context))),
+      appBar: topBar(context, 'Nhật ký hoạt động', left: IconButton(icon: const Icon(Icons.arrow_back), onPressed: () => Navigator.pop(context))),
       body: StreamBuilder<QuerySnapshot>(
-        stream: FirebaseService.db.collection('vehicles').doc(_vehicle!.id).collection('incident_logs').orderBy('time', descending: true).snapshots(),
+        stream: FirebaseService.db.collection('incident_logs')
+            .where('ownerId', isEqualTo: FirebaseService.auth.currentUser!.uid)
+            .orderBy('timestamp', descending: true)
+            .snapshots(),
         builder: (context, snapshot) {
-          final logs = snapshot.data?.docs ?? [];
-
+          if (snapshot.hasError) return Center(child: Text('Lỗi: ${snapshot.error}'));
           if (snapshot.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator());
+
+          final logs = snapshot.data?.docs ?? [];
 
           return Column(
             children: [
               Expanded(
                 child: logs.isEmpty 
                   ? Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-                      Icon(Icons.assignment_turned_in_outlined, size: 64, color: Colors.grey.shade300),
+                      Icon(Icons.assignment_turned_in_outlined, size: 64, color: Colors.grey.shade200),
                       const SizedBox(height: 16),
-                      const Text('Chưa có sự cố nào được ghi nhận.', style: TextStyle(color: Colors.grey)),
+                      const Text('Chưa có hoạt động nào được ghi nhận.', style: TextStyle(color: Colors.grey)),
                     ]))
                   : _buildLogList(logs),
               ),
@@ -125,10 +140,9 @@ class _IncidentLogsScreenState extends State<IncidentLogsScreen> {
   }
 
   Widget _buildLogList(List<QueryDocumentSnapshot> logs) {
-    // Nhóm logs theo ngày
     Map<String, List<QueryDocumentSnapshot>> grouped = {};
     for (var l in logs) {
-      final date = (l['time'] as Timestamp).toDate();
+      final date = (l['timestamp'] as Timestamp?)?.toDate() ?? DateTime.now();
       final key = DateFormat('dd/MM/yyyy').format(date);
       if (!grouped.containsKey(key)) grouped[key] = [];
       grouped[key]!.add(l);
@@ -139,7 +153,7 @@ class _IncidentLogsScreenState extends State<IncidentLogsScreen> {
       children: grouped.entries.map((entry) {
         final isToday = entry.key == DateFormat('dd/MM/yyyy').format(DateTime.now());
         final isYesterday = entry.key == DateFormat('dd/MM/yyyy').format(DateTime.now().subtract(const Duration(days: 1)));
-        final label = isToday ? 'HÔM NAY' : (isYesterday ? 'HÔM QUA · ${entry.key.substring(0, 5)}' : entry.key);
+        final label = isToday ? 'HÔM NAY' : (isYesterday ? 'HÔM QUA' : entry.key);
 
         return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Padding(
@@ -157,37 +171,46 @@ class _IncidentLogsScreenState extends State<IncidentLogsScreen> {
 
   Widget _logItem(QueryDocumentSnapshot l) {
     final d = l.data() as Map<String, dynamic>;
-    final time = (d['time'] as Timestamp).toDate();
-    final event = (d['event'] ?? 'Sự cố').toString().toLowerCase();
-    final detail = d['detail'] ?? '';
+    final time = (d['timestamp'] as Timestamp?)?.toDate() ?? DateTime.now();
+    final status = (d['status'] ?? '').toString();
+    final message = d['message'] ?? '';
     
     Color dotColor = Colors.blue;
-    if (event.contains('nguy hiểm') || event.contains('danger') || event.contains('ngập')) {
+    if (['pending', 'danger'].contains(status)) {
       dotColor = Colors.red;
-    } else if (event.contains('cảnh báo') || event.contains('warning')) {
-      dotColor = Colors.orange;
-    } else if (event.contains('thiết bị') || event.contains('kết nối') || event.contains('device')) {
+    } else if (['accepted', 'processing', 'warning'].contains(status)) {
       dotColor = Colors.blue;
-    } else if (event.contains('an toàn') || event.contains('safe') || event.contains('bình thường')) {
+    } else if (['done', 'safe'].contains(status)) {
       dotColor = Colors.green;
+    } else if (['timeout', 'cancelled'].contains(status)) {
+      dotColor = Colors.orange;
     }
 
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(border: Border(bottom: BorderSide(color: C.line(context), width: 0.5))),
-      child: Row(children: [
-        Container(
-          width: 10, height: 10, 
-          decoration: BoxDecoration(
-            color: dotColor, 
-            shape: BoxShape.circle,
-            boxShadow: [BoxShadow(color: dotColor.withValues(alpha: 0.3), blurRadius: 4)]
-          )
+      child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Padding(
+          padding: const EdgeInsets.only(top: 4),
+          child: Container(
+            width: 10, height: 10, 
+            decoration: BoxDecoration(
+              color: dotColor, 
+              shape: BoxShape.circle,
+              boxShadow: [BoxShadow(color: dotColor.withValues(alpha: 0.3), blurRadius: 4)]
+            )
+          ),
         ),
         const SizedBox(width: 16),
         Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text(d['event'] ?? 'Sự cố', style: T.body(context).copyWith(fontWeight: FontWeight.w600, fontSize: 14)),
-          Text(detail, style: T.caption(context)),
+          Text(_getEventName(status), style: T.body(context).copyWith(fontWeight: FontWeight.bold, fontSize: 14)),
+          const SizedBox(height: 2),
+          Text(message, style: T.caption(context).copyWith(height: 1.3)),
+          if (d['vehiclePlate'] != null) 
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text('Xe: ${d['vehiclePlate']}', style: T.small(context, Colors.grey).copyWith(fontSize: 10)),
+            ),
         ])),
         Text(DateFormat('HH:mm').format(time), style: T.caption(context)),
       ]),
@@ -205,11 +228,11 @@ class _IncidentLogsScreenState extends State<IncidentLogsScreen> {
           child: Row(children: [
             const Icon(Icons.verified_user_outlined, size: 18, color: Colors.green),
             const SizedBox(width: 12),
-            Expanded(child: Text('Sự kiện an toàn được lưu 12 tháng và không xoá được, dùng làm bằng chứng bảo hiểm.', style: T.caption(context).copyWith(color: Colors.green.shade800))),
+            Expanded(child: Text('Nhật ký được lưu trữ làm bằng chứng phục vụ yêu cầu bồi thường bảo hiểm.', style: T.caption(context).copyWith(color: Colors.green.shade800))),
           ]),
         ),
         const SizedBox(height: 16),
-        AppButton('Xuất nhật ký (PDF)', icon: Icons.picture_as_pdf, tone: Tone.ghost, height: 48, onTap: logs.isEmpty ? null : () => _exportPDF(logs)),
+        AppButton('Xuất báo cáo (PDF)', icon: Icons.picture_as_pdf, tone: Tone.ghost, height: 48, onTap: logs.isEmpty ? null : () => _exportPDF(logs)),
       ]),
     );
   }

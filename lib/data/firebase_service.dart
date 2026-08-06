@@ -91,6 +91,8 @@ class SOSRequest {
   final String status;
   final DateTime createdAt;
   final String? rescuerId;
+  final String? rescuerName;
+  final String? rescuerPhone;
   final String? garageName;
   final String? requesterName;
   final String? requesterPhone;
@@ -100,6 +102,16 @@ class SOSRequest {
   final bool? intakeClosed;
   final bool? personInside;
   final double? waterRisingSpeed;
+
+  // Mốc thời gian
+  final DateTime? acceptedAt;
+  final DateTime? movingAt;
+  final DateTime? arrivedAt;
+  final DateTime? doneAt;
+
+  // Vị trí thợ
+  final double? rescuerLat;
+  final double? rescuerLng;
 
   SOSRequest({
     required this.id,
@@ -113,6 +125,8 @@ class SOSRequest {
     required this.status,
     required this.createdAt,
     this.rescuerId,
+    this.rescuerName,
+    this.rescuerPhone,
     this.garageName,
     this.requesterName,
     this.requesterPhone,
@@ -120,6 +134,12 @@ class SOSRequest {
     this.intakeClosed,
     this.personInside,
     this.waterRisingSpeed,
+    this.acceptedAt,
+    this.movingAt,
+    this.arrivedAt,
+    this.doneAt,
+    this.rescuerLat,
+    this.rescuerLng,
   });
 
   factory SOSRequest.fromFirestore(DocumentSnapshot doc) {
@@ -136,6 +156,8 @@ class SOSRequest {
       status: data['status'] ?? 'pending',
       createdAt: (data['createdAt'] as Timestamp?)?.toDate() ?? DateTime.now(),
       rescuerId: data['rescuerId'],
+      rescuerName: data['rescuerName'],
+      rescuerPhone: data['rescuerPhone'],
       garageName: data['garageName'],
       requesterName: data['requesterName'],
       requesterPhone: data['requesterPhone'],
@@ -143,6 +165,12 @@ class SOSRequest {
       intakeClosed: data['intakeClosed'],
       personInside: data['personInside'],
       waterRisingSpeed: (data['waterRisingSpeed'] as num?)?.toDouble(),
+      acceptedAt: (data['acceptedAt'] as Timestamp?)?.toDate(),
+      movingAt: (data['movingAt'] as Timestamp?)?.toDate(),
+      arrivedAt: (data['arrivedAt'] as Timestamp?)?.toDate(),
+      doneAt: (data['doneAt'] as Timestamp?)?.toDate(),
+      rescuerLat: (data['rescuerLat'] as num?)?.toDouble(),
+      rescuerLng: (data['rescuerLng'] as num?)?.toDouble(),
     );
   }
 }
@@ -334,7 +362,6 @@ class FirebaseService {
 
     Query<Map<String, dynamic>> query = db.collection('sos_requests');
     
-    // NGUYÊN TẮC: Driver chỉ xem đơn của mình, Rescuer xem mọi đơn
     if (!isRescuer) {
       debugPrint('FIREBASE_QUERY: Driver role - filtering by requesterId: ${user.uid}');
       query = query.where('requesterId', isEqualTo: user.uid);
@@ -342,13 +369,11 @@ class FirebaseService {
       debugPrint('FIREBASE_QUERY: Rescuer role - fetching all active requests');
     }
 
-    // Lắng nghe realtime
     return query.snapshots().map((snap) {
       final docs = snap.docs.map((d) => SOSRequest.fromFirestore(d)).toList();
       
-      // LỌC PHÍA CLIENT theo trạng thái hoạt động (Nhóm các trạng thái active)
       final activeDocs = docs.where((r) => 
-        ['pending', 'accepted', 'processing', 'expanded'].contains(r.status)
+        ['pending', 'accepted', 'processing', 'arrived', 'expanded'].contains(r.status)
       ).toList();
 
       debugPrint('FIREBASE_QUERY: Found ${docs.length} total, ${activeDocs.length} active after client-side filter');
@@ -360,6 +385,9 @@ class FirebaseService {
     final u = auth.currentUser;
     if (u == null) return;
     
+    final prof = await getUserProfile();
+    final String rName = prof?['name'] ?? u.displayName ?? u.email?.split('@')[0] ?? 'Chủ xe';
+
     // Đóng đơn pending cũ của chính xe này (SỬA LỖI QUERY THIẾU REQUESTERID)
     final old = await db.collection('sos_requests')
         .where('requesterId', isEqualTo: u.uid)
@@ -374,9 +402,21 @@ class FirebaseService {
     }
     
     final doc = await db.collection('sos_requests').add({
-      'requesterId': u.uid, 'vehicleId': vehicleId, 'vehiclePlate': plate, 'vehicleModel': model,
-      'latitude': lat, 'longitude': lng, 'waterCm': waterCm, 'status': 'pending', 'createdAt': FieldValue.serverTimestamp(),
+      'requesterId': u.uid, 
+      'vehicleId': vehicleId, 
+      'vehiclePlate': plate, 
+      'vehicleModel': model,
+      'latitude': lat, 
+      'longitude': lng, 
+      'waterCm': waterCm, 
+      'status': 'pending', 
+      'createdAt': FieldValue.serverTimestamp(),
+      'requesterName': rName,
+      'requesterPhone': prof?['phone'],
     });
+
+    await _addIncidentLog(u.uid, doc.id, 'pending', plate, 'Đã gửi yêu cầu cứu hộ khẩn cấp tại mực nước ${waterCm}cm.');
+
     final newDoc = await doc.get();
     if (newDoc.exists) _sosSubject.add(SOSRequest.fromFirestore(newDoc));
   }
@@ -387,6 +427,7 @@ class FirebaseService {
     
     final prof = await getUserProfile();
     final String rName = prof?['name'] ?? 'Thợ cứu hộ';
+    final String rPhone = prof?['phone'] ?? '';
 
     return db.runTransaction((transaction) async {
       final docRef = db.collection('sos_requests').doc(id);
@@ -403,11 +444,84 @@ class FirebaseService {
         'status': 'accepted',
         'rescuerId': rid,
         'rescuerName': rName,
+        'rescuerPhone': rPhone,
         'garageName': gname,
         'acceptedAt': FieldValue.serverTimestamp(),
       });
+      
+      // Ghi nhật ký cho User
+      final reqData = snapshot.data()!;
+      _addIncidentLog(reqData['requesterId'], id, 'accepted', reqData['vehiclePlate'], 'Đơn vị $gname đã tiếp nhận yêu cầu.');
     });
   }
+
+  static Future<void> _addIncidentLog(String ownerId, String sosId, String status, String plate, String message) async {
+    await db.collection('incident_logs').add({
+      'ownerId': ownerId,
+      'sosId': sosId,
+      'status': status,
+      'vehiclePlate': plate,
+      'timestamp': FieldValue.serverTimestamp(),
+      'message': message,
+    });
+  }
+
+  static Future<void> updateSOSStatus(String id, String status) async {
+    final Map<String, dynamic> updates = {'status': status};
+    if (status == 'processing') updates['movingAt'] = FieldValue.serverTimestamp();
+    if (status == 'arrived') updates['arrivedAt'] = FieldValue.serverTimestamp();
+    if (status == 'done') updates['doneAt'] = FieldValue.serverTimestamp();
+
+    await db.collection('sos_requests').doc(id).update(updates);
+    
+    // Ghi nhật ký lịch sử sự cố
+    final snap = await db.collection('sos_requests').doc(id).get();
+    if (snap.exists) {
+      final req = SOSRequest.fromFirestore(snap);
+      await _addIncidentLog(req.requesterId, id, status, req.vehiclePlate, _getStatusMessage(status, req.garageName));
+    }
+
+    if (status == 'done' || status == 'cancelled') _sosSubject.add(null);
+  }
+
+  static String _getStatusMessage(String status, String? garage) {
+    switch (status) {
+      case 'accepted': return 'Đơn vị $garage đã tiếp nhận yêu cầu.';
+      case 'processing': return 'Cứu hộ đang trên đường tới hiện trường.';
+      case 'arrived': return 'Cứu hộ đã tới vị trí xe.';
+      case 'done': return 'Hoàn tất quá trình cứu hộ.';
+      case 'cancelled': return 'Yêu cầu cứu hộ đã bị hủy.';
+      default: return 'Trạng thái đơn hàng thay đổi: $status';
+    }
+  }
+
+  static Future<void> updateRescuerLocation(String id, double lat, double lng) async {
+    await db.collection('sos_requests').doc(id).update({
+      'rescuerLat': lat,
+      'rescuerLng': lng,
+    });
+  }
+
+  static Future<void> cancelSOSByRescuer(String id) async {
+    final snap = await db.collection('sos_requests').doc(id).get();
+    if (snap.exists) {
+      _addIncidentLog(snap.data()!['requesterId'], id, 'pending', snap.data()!['vehiclePlate'], 'Cứu hộ đã hủy nhận đơn, hệ thống đang tìm đơn vị khác.');
+    }
+    await db.collection('sos_requests').doc(id).update({
+      'status': 'pending',
+      'rescuerId': null,
+      'rescuerName': null,
+      'rescuerPhone': null,
+      'garageName': null,
+      'acceptedAt': null,
+      'movingAt': null,
+      'arrivedAt': null,
+      'rescuerLat': null,
+      'rescuerLng': null,
+    });
+  }
+
+  static Future<void> cancelSOS(String id) async => await updateSOSStatus(id, 'cancelled');
 
   static Stream<SOSRequest?> streamSOSDetail(String id) {
     return db.collection('sos_requests').doc(id).snapshots().map((doc) {
@@ -415,13 +529,6 @@ class FirebaseService {
       return SOSRequest.fromFirestore(doc);
     });
   }
-
-  static Future<void> updateSOSStatus(String id, String status) async {
-    await db.collection('sos_requests').doc(id).update({'status': status});
-    if (status == 'done' || status == 'cancelled') _sosSubject.add(null);
-  }
-
-  static Future<void> cancelSOS(String id) async => await updateSOSStatus(id, 'cancelled');
 
   static Future<List<SOSRequest>> getRecentSOS({int limit = 5}) async {
     final u = auth.currentUser;

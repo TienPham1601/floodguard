@@ -19,6 +19,7 @@ import '../data/directions.dart';
 import '../data/places.dart';
 import '../screens/driver/flood_report_screen.dart';
 import '../screens/rescue/request_detail_screen.dart';
+import '../screens/rescue/quote_input_screen.dart';
 
 class AppMap extends StatefulWidget {
   final LatLng center;
@@ -143,12 +144,7 @@ class AppMapState extends State<AppMap> {
 
   Future<void> _loadSmartRoute() async {
     final MapTarget? currentTarget = widget.target ?? ORSNavigation.target.value;
-    if (currentTarget == null || _currentPos == null) {
-      debugPrint('APP_MAP_NAV: target=$currentTarget, currentPos=$_currentPos. Aborting.');
-      return;
-    }
-    
-    debugPrint('APP_MAP_NAV: bat dau - To: ${currentTarget.pos.latitude}, ${currentTarget.pos.longitude}');
+    if (currentTarget == null || _currentPos == null) return;
     
     setState(() => _loadingRoute = true);
     try {
@@ -157,22 +153,27 @@ class AppMapState extends State<AppMap> {
         return [LatLng(z.center.latitude - d, z.center.longitude - d), LatLng(z.center.latitude + d, z.center.longitude - d), LatLng(z.center.latitude + d, z.center.longitude + d), LatLng(z.center.latitude - d, z.center.longitude + d), LatLng(z.center.latitude - d, z.center.longitude - d)];
       }).toList();
       
+      // ORS: [longitude, latitude]
       final route = await RoutingService.fetchRoute(_currentPos!, currentTarget.pos, avoidPolygons: avoidPolys);
       if (mounted) {
         setState(() { _currentRoute = route; _loadingRoute = false; _currentStepIdx = 0; });
         if (route != null) {
-          debugPrint('APP_MAP_NAV: Fetch success - points=${route.points.length}, dist=${route.distanceText}');
           _fitBounds(route.points);
-          if (widget.isRescuerMode) _startNavigation();
-        } else {
-          debugPrint('APP_MAP_NAV: Fetch failed (null route)');
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Không thể tìm thấy tuyến đường an toàn.')));
+          if (widget.isRescuerMode) {
+            // Check if request is already accepted, if so auto start nav
+            _checkAndAutoStartNav(currentTarget);
+          }
         }
       }
     } catch (e) {
-      debugPrint('APP_MAP_NAV: ERROR - $e');
       if (mounted) setState(() => _loadingRoute = false);
     }
+  }
+
+  void _checkAndAutoStartNav(MapTarget target) async {
+    // If we're already accepted this target, start nav
+    // For now we just start nav if it's rescuer mode and target is set
+    _startNavigation();
   }
 
   void _startNavigation() {
@@ -186,14 +187,13 @@ class AppMapState extends State<AppMap> {
         final nearest = _getNearestPointOnRoute(latlng, _currentRoute!.points);
         final dist = Geolocator.distanceBetween(latlng.latitude, latlng.longitude, nearest.latitude, nearest.longitude);
         if (dist > 50) {
-          debugPrint('APP_MAP: Off-route ($dist m), rerouting...');
           _loadSmartRoute();
         }
       }
 
       setState(() { _currentPos = latlng; _currentHeading = p.heading; _currentSpeed = p.speed * 3.6; });
       _mapController.rotate(360 - p.heading);
-      _mapController.move(latlng, 18.0);
+      _mapController.move(latlng, 18.0); 
       _updateNav(latlng);
 
       if (widget.isRescuerMode) {
@@ -216,7 +216,11 @@ class AppMapState extends State<AppMap> {
   void _updateRescuerGPSInFirestore(LatLng pos) async {
     final user = FirebaseService.auth.currentUser;
     if (user == null) return;
-    final snap = await FirebaseService.db.collection('sos_requests').where('rescuerId', isEqualTo: user.uid).where('status', whereIn: ['accepted', 'processing', 'arrived']).limit(1).get();
+    final snap = await FirebaseService.db.collection('sos_requests')
+        .where('rescuerId', isEqualTo: user.uid)
+        .where('status', whereIn: ['accepted', 'processing', 'arrived'])
+        .limit(1)
+        .get();
     if (snap.docs.isNotEmpty) {
       FirebaseService.updateRescuerLocation(snap.docs.first.id, pos.latitude, pos.longitude);
     }
@@ -264,8 +268,6 @@ class AppMapState extends State<AppMap> {
               stream: FirebaseService.streamActiveSOS(isRescuer: widget.isRescuerMode),
               builder: (c, snap) {
                 final requests = snap.data ?? [];
-                debugPrint('MAP_SOS_DEBUG: requests.length=${requests.length}');
-                
                 final List<List<SOSRequest>> clusters = [];
                 const double clusterDistanceThreshold = 0.0005;
                 for (var r in requests) {
@@ -332,6 +334,7 @@ class AppMapState extends State<AppMap> {
   }
 
   void _showSOSDetail(SOSRequest r) async {
+    // 1. VẼ LUÔN ROUTE 
     if (widget.isRescuerMode && _currentPos != null) {
       ORSNavigation.target.value = MapTarget(name: r.vehiclePlate, subtitle: r.vehicleModel, pos: LatLng(r.latitude, r.longitude));
     }
@@ -349,7 +352,7 @@ class AppMapState extends State<AppMap> {
         child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
           Center(child: Container(width: 40, height: 4, decoration: BoxDecoration(color: Colors.grey.shade200, borderRadius: BorderRadius.circular(2)))),
           const SizedBox(height: 24),
-          Row(children: [StatusTag(r.status == 'pending' ? 'Yêu cầu mới' : 'Đang xử lý', bg: r.status == 'pending' ? Colors.red.shade50 : Colors.blue.shade50, fg: r.status == 'pending' ? Colors.red : Colors.blue), const Spacer(), Text(DateFormat('HH:mm').format(r.createdAt), style: T.caption(ctx))]),
+          Row(children: [StatusTag(r.status == 'pending' ? 'Yêu cầu mới' : (r.status == 'quoted' ? 'Đã gửi báo giá' : 'Đang xử lý'), bg: r.status == 'pending' ? Colors.red.shade50 : Colors.blue.shade50, fg: r.status == 'pending' ? Colors.red : Colors.blue), const Spacer(), Text(DateFormat('HH:mm').format(r.createdAt), style: T.caption(ctx))]),
           const SizedBox(height: 20),
           Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(r.vehicleModel, style: T.title(ctx).copyWith(fontSize: 22)), Text('Biển số: ${widget.isRescuerMode && r.status == 'pending' ? _maskPlate(r.vehiclePlate) : r.vehiclePlate}', style: T.body(ctx))])), Column(crossAxisAlignment: CrossAxisAlignment.end, children: [Text(distText, style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.blue, fontSize: 18)), Text('Dự kiến $timeText', style: T.caption(ctx))])]),
           const SizedBox(height: 12),
@@ -359,12 +362,9 @@ class AppMapState extends State<AppMap> {
           const SizedBox(height: 32),
           if (widget.isRescuerMode) ...[
             if (r.status == 'pending' || r.status == 'expanded')
-              AppButton('TIẾP NHẬN CỨU HỘ', height: 58, onTap: () async {
-                try {
-                  final prof = await FirebaseService.getUserProfile();
-                  await FirebaseService.acceptSOS(r.id, FirebaseService.auth.currentUser!.uid, prof?['garageName'] ?? 'Gara của bạn');
-                  if (ctx.mounted) { Navigator.pop(ctx); _startNavigation(); }
-                } catch (e) { if (ctx.mounted) { Navigator.pop(ctx); ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Lỗi: $e'))); } }
+              AppButton('BÁO GIÁ & NHẬN ĐƠN', height: 58, onTap: () {
+                Navigator.pop(ctx);
+                Navigator.push(context, MaterialPageRoute(builder: (_) => QuoteInputScreen(req: r, distText: distText, timeText: timeText)));
               })
             else
               AppButton('BẮT ĐẦU CHỈ ĐƯỜNG', height: 58, icon: Icons.navigation, onTap: () { Navigator.pop(ctx); _startNavigation(); }),
@@ -407,7 +407,6 @@ class AppMapState extends State<AppMap> {
   Widget _legItem(Color c, String t, {bool isMarker = false, bool isCamera = false}) => Padding(padding: const EdgeInsets.symmetric(vertical: 6), child: Row(children: [Container(width: 16, height: 16, decoration: BoxDecoration(color: isMarker ? Colors.red : (isCamera ? Colors.blue.shade700 : c.withValues(alpha: 0.5)), shape: (isMarker || isCamera) ? BoxShape.circle : BoxShape.rectangle, borderRadius: (isMarker || isCamera) ? null : BorderRadius.circular(4), border: Border.all(color: (isMarker || isCamera) ? Colors.white : c, width: (isMarker || isCamera) ? 2 : 1)), child: isCamera ? const Icon(Icons.camera_alt, size: 10, color: Colors.white) : null), const SizedBox(width: 10), Text(t, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600))]));
 
   Widget _navHeader() {
-    final MapTarget? currentTarget = widget.target ?? ORSNavigation.target.value;
     return Container(padding: const EdgeInsets.all(20), decoration: BoxDecoration(gradient: LinearGradient(colors: [C.brand(context), C.brand(context).withValues(alpha: 0.8)]), borderRadius: BorderRadius.circular(20), boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 15, offset: Offset(0, 6))]), child: Row(children: [const Icon(Icons.navigation, color: Colors.white, size: 32), const SizedBox(width: 14), Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(_nextInstruction.isEmpty ? "Dẫn đường an toàn..." : _nextInstruction, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 17)), if (_currentRoute != null) Text('${_currentRoute!.distanceText} · ${_currentRoute!.durationText}', style: TextStyle(color: Colors.white.withValues(alpha: 0.8), fontSize: 13))])), IconButton(icon: const Icon(Icons.check_circle, color: Colors.white, size: 28), onPressed: _clearRoute)]));
   }
 

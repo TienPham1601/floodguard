@@ -9,6 +9,7 @@ import '../../data/places.dart';
 import '../../data/directions.dart';
 import '../../utils.dart';
 import 'already_taken_screen.dart';
+import 'quote_input_screen.dart';
 
 class RequestDetailScreen extends StatefulWidget {
   final String id;
@@ -22,12 +23,18 @@ class _RequestDetailScreenState extends State<RequestDetailScreen> {
   String _address = 'Đang tải vị trí...';
   double? _distKm;
   String? _durationText;
-  bool _loadingAction = false;
+  bool _isDisposed = false;
 
   @override
   void initState() {
     super.initState();
     _loadExtraData();
+  }
+
+  @override
+  void dispose() {
+    _isDisposed = true;
+    super.dispose();
   }
 
   Future<void> _loadExtraData() async {
@@ -43,7 +50,7 @@ class _RequestDetailScreenState extends State<RequestDetailScreen> {
 
     final addr = await SearchService.reverseGeocode(req.latitude, req.longitude);
 
-    if (mounted) {
+    if (mounted && !_isDisposed) {
       setState(() {
         _address = addr;
         if (route != null) {
@@ -59,39 +66,19 @@ class _RequestDetailScreenState extends State<RequestDetailScreen> {
     return '${plate.substring(0, 3)}-***.**';
   }
 
-  void _onAccept(SOSRequest req) async {
-    setState(() => _loadingAction = true);
-    try {
-      final prof = await FirebaseService.getUserProfile();
-      await FirebaseService.acceptSOS(req.id, FirebaseService.auth.currentUser!.uid, prof?['garageName'] ?? 'Gara của bạn');
-      if (mounted) {
-        ORSNavigation.target.value = MapTarget(
-          name: req.vehiclePlate,
-          subtitle: req.vehicleModel,
-          pos: LatLng(req.latitude, req.longitude),
-        );
-        Navigator.of(context).popUntil((route) => route.isFirst);
-      }
-    } catch (e) {
-      if (e.toString().contains('ALREADY_TAKEN')) {
-        if (mounted) Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const AlreadyTakenScreen()));
-      } else {
-        if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Lỗi: $e')));
-      }
-    } finally {
-      if (mounted) setState(() => _loadingAction = false);
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     return StreamBuilder<SOSRequest?>(
       stream: FirebaseService.streamSOSDetail(widget.id),
       builder: (context, snapshot) {
-        if (!snapshot.hasData) return const Scaffold(body: Center(child: CircularProgressIndicator()));
+        if (snapshot.connectionState == ConnectionState.waiting && !snapshot.hasData) {
+          return const Scaffold(body: Center(child: CircularProgressIndicator()));
+        }
+        if (!snapshot.hasData) return const Scaffold(body: Center(child: Text('Yêu cầu không còn tồn tại.')));
+
         final req = snapshot.data!;
         final bool isAcceptedByMe = req.rescuerId == FirebaseService.auth.currentUser?.uid;
-        final bool isPending = req.status == 'pending' || req.status == 'expanded';
+        final bool isPending = req.status == 'pending' || req.status == 'expanded' || req.status == 'quoted';
         final bool unlocked = isAcceptedByMe;
 
         return Screen(
@@ -104,6 +91,8 @@ class _RequestDetailScreenState extends State<RequestDetailScreen> {
                 const AlertBanner(level: Level.safe, icon: Icons.check_circle_outline, text: 'Bạn đã nhận yêu cầu này. Chủ xe đã được thông báo.')
               else if (!isPending && !unlocked)
                 const AlertBanner(level: Level.warn, text: 'Yêu cầu này đã được đơn vị khác tiếp nhận.')
+              else if (req.status == 'quoted' && !unlocked)
+                const AlertBanner(level: Level.warn, text: 'Đơn này đã có thợ báo giá. Bạn vẫn có thể báo giá cạnh tranh.')
               else
                 const AlertBanner(level: Level.danger, text: 'Xe ngập nước. Gửi cách đây ít phút.'),
               
@@ -141,6 +130,7 @@ class _RequestDetailScreenState extends State<RequestDetailScreen> {
                   ]),
                   const SizedBox(height: 12),
                   _kv(context, 'Khu vực', _address),
+                  if (unlocked) _kv(context, 'Toạ độ', '${req.latitude.toStringAsFixed(5)}, ${req.longitude.toStringAsFixed(5)}', mono: true),
                   _kv(context, 'Chủ xe', req.requesterName ?? 'Chủ xe', masked: !unlocked),
                   _kv(context, 'Điện thoại', req.requesterPhone ?? '...', mono: unlocked, masked: !unlocked),
                 ]),
@@ -169,14 +159,13 @@ class _RequestDetailScreenState extends State<RequestDetailScreen> {
                   ),
                 ]),
               ] else if (isPending) ...[
-                if (_loadingAction)
-                  const Center(child: CircularProgressIndicator())
-                else
-                  AppButton('NHẬN CỨU HỘ NGAY', icon: Icons.lock_open, height: 58, onTap: () => _onAccept(req)),
+                AppButton('BÁO GIÁ & NHẬN ĐƠN', height: 60, icon: Icons.request_quote_outlined, onTap: () {
+                   Navigator.push(context, MaterialPageRoute(builder: (_) => QuoteInputScreen(req: req, distText: _distKm != null ? '${_distKm!.toStringAsFixed(1)}km' : '...', timeText: _durationText ?? '...')));
+                }),
                 const SizedBox(height: S.x2),
                 AppButton('Bỏ qua', tone: Tone.ghost, onTap: () => Navigator.pop(context)),
                 const SizedBox(height: S.x2),
-                Text('Sau khi nhận, bạn sẽ thấy toạ độ chính xác và SĐT chủ xe.',
+                Text('Khi gửi báo giá, chủ xe sẽ thấy thông tin của bạn.\nBạn chỉ thấy SĐT chính xác khi họ đồng ý.',
                     textAlign: TextAlign.center, style: T.caption(context)),
               ],
             ],

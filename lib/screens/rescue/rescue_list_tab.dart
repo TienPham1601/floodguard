@@ -27,7 +27,7 @@ class _RescueListTabState extends State<RescueListTab> {
   @override
   void initState() {
     super.initState();
-    // Cache stream một lần duy nhất để chống lag (Việc 2 - Fix rebuild loop)
+    // Khởi tạo stream một lần duy nhất (Việc 3b)
     _sosStream = FirebaseService.streamActiveSOS(isRescuer: true);
     _initData();
   }
@@ -80,17 +80,27 @@ class _List extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    debugPrint('LIST build: status=$status'); // Việc 3 - Debug build
     return StreamBuilder<List<SOSRequest>>(
       stream: stream,
       builder: (context, snapshot) {
-        if (snapshot.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator());
+        // Việc 3a, 3c: Xử lý loading và rỗng chuẩn xác
+        if (snapshot.connectionState == ConnectionState.waiting && !snapshot.hasData) {
+          return const Center(child: CircularProgressIndicator());
+        }
+
+        if (snapshot.hasError) {
+          return Center(child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Text('Lỗi kết nối: ${snapshot.error}', textAlign: TextAlign.center, style: const TextStyle(color: Colors.red)),
+          ));
+        }
         
         var list = snapshot.data ?? [];
         final user = FirebaseAuth.instance.currentUser;
         
         if (status == 'pending') {
-          list = list.where((r) => r.status == 'pending' || r.status == 'expanded').toList();
-          // Lọc bán kính (Việc 1)
+          list = list.where((r) => ['pending', 'expanded', 'quoted'].contains(r.status)).toList();
           if (myPos.latitude != 0) {
             list = list.where((r) {
               final d = Geolocator.distanceBetween(myPos.latitude, myPos.longitude, r.latitude, r.longitude) / 1000;
@@ -137,15 +147,26 @@ class _ActiveTaskCardState extends State<_ActiveTaskCard> {
   Timer? _routeRefreshTimer;
   LatLng? _lastCalculatedPos;
   bool _isDisposed = false;
+  StreamSubscription? _statusSub;
 
   @override
   void initState() {
     super.initState();
     _calcRoute();
-    _startLocationSharing();
-    // Cập nhật route định kỳ (Việc 2)
+    _startTracking();
     _routeRefreshTimer = Timer.periodic(const Duration(seconds: 45), (t) {
       if (!_isDisposed) _calcRoute();
+    });
+
+    // Việc 2: Lắng nghe realtime trạng thái đơn để đồng bộ khi user hủy
+    _statusSub = FirebaseService.db.collection('sos_requests').doc(widget.req.id).snapshots().listen((snap) {
+      if (!snap.exists || snap.data()?['status'] == 'cancelled' || snap.data()?['status'] == 'timeout') {
+         if (mounted) {
+           ScaffoldMessenger.of(context).showSnackBar(
+             const SnackBar(content: Text('Yêu cầu đã bị hủy hoặc hết hiệu lực.'), backgroundColor: Colors.orange)
+           );
+         }
+      }
     });
   }
 
@@ -154,12 +175,13 @@ class _ActiveTaskCardState extends State<_ActiveTaskCard> {
     _isDisposed = true;
     _locationTimer?.cancel();
     _routeRefreshTimer?.cancel();
+    _statusSub?.cancel();
     super.dispose();
   }
 
-  void _startLocationSharing() {
+  void _startTracking() {
     _locationTimer = Timer.periodic(const Duration(seconds: 20), (t) async {
-      if (widget.req.status == 'processing') {
+      if (widget.req.status == 'processing' && !_isDisposed) {
         try {
           final p = await Geolocator.getCurrentPosition(timeLimit: const Duration(seconds: 5));
           FirebaseService.updateRescuerLocation(widget.req.id, p.latitude, p.longitude);
@@ -170,8 +192,6 @@ class _ActiveTaskCardState extends State<_ActiveTaskCard> {
 
   Future<void> _calcRoute() async {
     if (['arrived', 'done'].contains(widget.req.status)) return;
-    
-    // DEBOUNCE: Chỉ tính lại nếu vị trí thợ thay đổi đáng kể (>100m)
     if (_lastCalculatedPos != null) {
       final d = Geolocator.distanceBetween(widget.myPos.latitude, widget.myPos.longitude, _lastCalculatedPos!.latitude, _lastCalculatedPos!.longitude);
       if (d < 100 && _distText != null) return;
@@ -189,7 +209,7 @@ class _ActiveTaskCardState extends State<_ActiveTaskCard> {
 
   @override
   Widget build(BuildContext context) {
-    debugPrint('PROCESSING build: ${DateTime.now().millisecondsSinceEpoch} - ID: ${widget.req.id}');
+    debugPrint('PROCESSING build: ${DateTime.now().millisecondsSinceEpoch}');
     final req = widget.req;
     final bool isArrived = req.status == 'arrived';
     final bool isProcessing = req.status == 'processing';
@@ -198,7 +218,6 @@ class _ActiveTaskCardState extends State<_ActiveTaskCard> {
       margin: const EdgeInsets.only(bottom: 20),
       padding: const EdgeInsets.all(20),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        // Card đầu: Biển số ĐẦY ĐỦ (Việc 3D)
         Row(children: [
           Container(
             padding: const EdgeInsets.all(10),
@@ -215,7 +234,6 @@ class _ActiveTaskCardState extends State<_ActiveTaskCard> {
         
         const SizedBox(height: 24),
         
-        // Ô nổi bật: km + phút (Việc 3D)
         if (!isArrived) Container(
           padding: const EdgeInsets.all(16),
           decoration: BoxDecoration(color: Colors.blue.shade50, borderRadius: BorderRadius.circular(16)),
@@ -230,7 +248,6 @@ class _ActiveTaskCardState extends State<_ActiveTaskCard> {
         Text('TIẾN ĐỘ CỨU HỘ', style: T.caption(context).copyWith(fontWeight: FontWeight.bold, letterSpacing: 1)),
         const SizedBox(height: 20),
 
-        // TIMELINE dọc 4 bước (Việc 3D)
         _step(1, 'Đã nhận yêu cầu', time: req.acceptedAt, done: true),
         _step(2, 'Đang di chuyển', time: req.movingAt, done: req.movingAt != null, active: isProcessing, sub: 'đang chia sẻ vị trí cho chủ xe'),
         _step(3, 'Đã tới hiện trường', time: req.arrivedAt, done: req.arrivedAt != null, active: isArrived),
@@ -238,7 +255,6 @@ class _ActiveTaskCardState extends State<_ActiveTaskCard> {
 
         const SizedBox(height: 32),
         
-        // Nút bấm
         Row(children: [
           Expanded(child: AppButton('Gọi chủ xe', icon: Icons.phone, tone: Tone.ghost, onTap: () => callPhone(context, req.requesterPhone ?? ''))),
           const SizedBox(width: 12),
@@ -317,7 +333,9 @@ class _SOSCard extends StatelessWidget {
           padding: const EdgeInsets.all(16),
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             Row(children: [
-              StatusTag('YÊU CẦU MỚI', bg: Colors.red.shade50, fg: Colors.red),
+              StatusTag(req.status == 'quoted' ? 'ĐANG CHỜ PHẢN HỒI' : 'YÊU CẦU MỚI', 
+                  bg: req.status == 'quoted' ? Colors.blue.shade50 : Colors.red.shade50, 
+                  fg: req.status == 'quoted' ? Colors.blue : Colors.red),
               const Spacer(),
               Text(DateFormat('HH:mm, dd/MM').format(req.createdAt), style: T.caption(context)),
             ]),
@@ -328,13 +346,13 @@ class _SOSCard extends StatelessWidget {
             Row(children: [
               Icon(Icons.location_on, size: 14, color: Colors.grey.shade400),
               const SizedBox(width: 4),
-              Expanded(child: Text('Vị trí: ${req.latitude.toStringAsFixed(4)}, ${req.longitude.toStringAsFixed(4)}', style: T.small(context))),
+              Expanded(child: Text('Toạ độ: ${req.latitude.toStringAsFixed(4)}, ${req.longitude.toStringAsFixed(4)}', style: T.small(context))),
               Text('${dist.toStringAsFixed(1)} km', style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.blue)),
             ]),
             const Divider(height: 32),
             Row(children: [
               Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Text('Mực nước tại xe', style: T.caption(context)),
+                const Text('Mực nước hiện tại', style: TextStyle(fontSize: 10, color: Colors.grey)),
                 Text('${req.waterCm} cm', style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.red, fontSize: 16)),
               ]),
               const Spacer(),

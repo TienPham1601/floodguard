@@ -1,8 +1,8 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
-// Removed unused: dart:developer
 import 'package:flutter/services.dart';
 import 'package:latlong2/latlong.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:intl/intl.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import 'insurance_report_screen.dart';
@@ -13,7 +13,6 @@ import '../../data/location_service.dart';
 import '../../data/places.dart';
 import '../../data/firebase_service.dart';
 
-// MỐC THỜI GIAN TEST
 const int SEARCH_LIMIT_SECONDS = 30;
 const int TIMEOUT_SECONDS = 45;
 
@@ -30,6 +29,7 @@ class _SosScreenState extends State<SosScreen> {
   LatLng? _currentPos;
   String _address = 'Đang định vị...';
   VehicleData? _currentVehicle;
+  String? _lastStatus;
 
   late Stream<VehicleData?> _vehicleStream;
   late Stream<SOSRequest?> _sosStream;
@@ -102,8 +102,16 @@ class _SosScreenState extends State<SosScreen> {
           initialData: FirebaseService.cachedSOS,
           builder: (context, sosSnap) {
             final activeSOS = sosSnap.data;
+            
+            if (activeSOS?.status == 'done') return _RatingScreen(req: activeSOS!);
+
             final bool isReallyActive = activeSOS != null && 
-                ['pending', 'accepted', 'processing', 'expanded'].contains(activeSOS.status);
+                ['pending', 'quoted', 'accepted', 'processing', 'arrived', 'expanded'].contains(activeSOS.status);
+
+            if (activeSOS != null && _lastStatus == 'pending' && activeSOS.status == 'accepted') {
+              HapticFeedback.vibrate();
+            }
+            _lastStatus = activeSOS?.status;
 
             return AnimatedSwitcher(
               duration: const Duration(milliseconds: 400),
@@ -115,6 +123,13 @@ class _SosScreenState extends State<SosScreen> {
         );
       },
     );
+  }
+
+  Widget _buildActiveUI(BuildContext context, SOSRequest req) {
+    if (req.status == 'quoted') return _QuoteSelectionView(req: req);
+    if (['accepted', 'processing', 'arrived'].contains(req.status)) return _TrackingView(req: req);
+    if (req.status == 'timeout') return _buildTimeoutUI(req);
+    return _WaitingView(req: req);
   }
 
   Widget _buildIdleUI(BuildContext context) {
@@ -195,32 +210,6 @@ class _SosScreenState extends State<SosScreen> {
 
   Widget _kv(String k, String v) => Padding(padding: const EdgeInsets.symmetric(vertical: 4), child: Row(children: [SizedBox(width: 80, child: Text(k, style: T.caption(context))), Expanded(child: Text(v, style: T.small(context).copyWith(fontWeight: FontWeight.w600)))]));
 
-  Widget _buildActiveUI(BuildContext context, SOSRequest req) {
-    if (req.status == 'accepted' || req.status == 'processing') return _buildAcceptedUI(req);
-    if (req.status == 'timeout') return _buildTimeoutUI(req);
-    return _WaitingView(req: req);
-  }
-
-  Widget _buildAcceptedUI(SOSRequest req) {
-    return ListView(
-      key: const ValueKey('accepted'),
-      padding: const EdgeInsets.all(28),
-      children: [
-        StatusTag('Đã có đơn vị tiếp nhận', bg: Colors.blue.shade50, fg: Colors.blue.shade700),
-        const SizedBox(height: 24),
-        Text(req.garageName ?? 'Đang kết nối...', style: T.h2(context)),
-        Text('Đơn vị cứu hộ đang di chuyển tới vị trí của bạn.', style: T.body(context, C.muted(context))),
-        const SizedBox(height: 40),
-        AppButton('Gọi cứu hộ', icon: Icons.phone, height: 56, onTap: () => callPhone(context, '115')),
-        const SizedBox(height: 16),
-        AppButton('Lập hồ sơ bảo hiểm', tone: Tone.soft, icon: Icons.verified_user_outlined, 
-            onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => InsuranceReportScreen(initialSOS: req)))),
-        const SizedBox(height: 40),
-        AppButton('Đóng', tone: Tone.ghost, onTap: () => FirebaseService.updateSOSStatus(req.id, 'done')),
-      ],
-    );
-  }
-
   Widget _buildTimeoutUI(SOSRequest req) {
     return ListView(
       key: const ValueKey('timeout'),
@@ -232,7 +221,6 @@ class _SosScreenState extends State<SosScreen> {
         const SizedBox(height: 12),
         const Text('Hệ thống không tìm thấy đơn vị cứu hộ nào phản hồi trong khu vực của bạn.', textAlign: TextAlign.center),
         const SizedBox(height: 48),
-        // SỬA AN TOÀN: Bỏ FittedBox, rút gọn nhãn, thêm hotline bên dưới
         AppButton('Gọi cứu hộ 116', icon: Icons.phone, height: 56, onTap: () => callPhone(context, '0896116116')),
         const SizedBox(height: 8),
         const Center(child: Text('Hotline: 0896.116.116', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.grey))),
@@ -241,6 +229,296 @@ class _SosScreenState extends State<SosScreen> {
       ],
     );
   }
+}
+
+class _QuoteSelectionView extends StatelessWidget {
+  final SOSRequest req;
+  const _QuoteSelectionView({required this.req});
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<List<SOSQuote>>(
+      stream: FirebaseService.streamQuotes(req.id),
+      builder: (context, snapshot) {
+        final quotes = snapshot.data ?? [];
+        return ListView(
+          padding: const EdgeInsets.all(28),
+          children: [
+            const SizedBox(height: 10),
+            Center(
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                decoration: BoxDecoration(color: Colors.blue.shade50, borderRadius: BorderRadius.circular(20)),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.request_quote_outlined, size: 18, color: Colors.blue),
+                    const SizedBox(width: 8),
+                    Text('Đã có đơn vị báo giá', style: TextStyle(color: Colors.blue, fontWeight: FontWeight.bold, fontSize: 13)),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 24),
+            Text('Đề xuất cứu hộ', style: T.h2(context), textAlign: TextAlign.center),
+            const SizedBox(height: 8),
+            Text('Chọn đơn vị phù hợp nhất với bạn', style: T.body(context, Colors.grey), textAlign: TextAlign.center),
+            const SizedBox(height: 32),
+
+            if (quotes.isEmpty) 
+               const Center(child: Padding(padding: EdgeInsets.all(40), child: CircularProgressIndicator()))
+            else
+               ...quotes.map((q) => _quoteCard(context, q)),
+
+            const SizedBox(height: 24),
+            AppButton('Hủy yêu cầu SOS', tone: Tone.ghost, onTap: () => FirebaseService.cancelSOS(req.id)),
+          ],
+        );
+      }
+    );
+  }
+
+  Widget _quoteCard(BuildContext context, SOSQuote q) {
+    final currencyFormat = NumberFormat.currency(locale: 'vi_VN', symbol: 'đ');
+    return AppCard(
+      margin: const EdgeInsets.only(bottom: 16),
+      padding: const EdgeInsets.all(20),
+      child: Column(children: [
+        Row(children: [
+          CircleAvatar(radius: 24, backgroundColor: C.brandBg(context), child: Text(q.garageName.isNotEmpty ? q.garageName[0] : 'G', style: T.title(context).copyWith(color: C.brand(context)))),
+          const SizedBox(width: 12),
+          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(q.garageName, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+            Row(children: [
+              const Icon(Icons.star, size: 14, color: Colors.orange),
+              const SizedBox(width: 4),
+              Text(q.rating > 0 ? '${q.rating.toStringAsFixed(1)} (${q.ratingCount} đánh giá)' : 'Chưa có đánh giá', style: T.caption(context)),
+            ]),
+          ])),
+          IconButton(icon: const Icon(Icons.phone, color: Colors.blue), onPressed: () => callPhone(context, q.rescuerPhone)),
+        ]),
+        const Divider(height: 32),
+        Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+          const Text('GIÁ DỊCH VỤ', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.grey)),
+          Text(currencyFormat.format(q.price), style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w900, color: Colors.blue)),
+        ]),
+        if (q.note.isNotEmpty) Padding(padding: const EdgeInsets.only(top: 8), child: Text(q.note, style: T.small(context, Colors.grey.shade700))),
+        const SizedBox(height: 24),
+        Row(children: [
+          Expanded(child: AppButton('Từ chối', tone: Tone.soft, onTap: () => FirebaseService.declineQuote(req.id, q.rescuerId))),
+          const SizedBox(width: 12),
+          Expanded(flex: 2, child: AppButton('ĐỒNG Ý', onTap: () => FirebaseService.acceptQuote(req.id, q))),
+        ]),
+      ]),
+    ).animate().fade().slideY(begin: 0.1);
+  }
+}
+
+class _TrackingView extends StatelessWidget {
+  final SOSRequest req;
+  const _TrackingView({required this.req});
+
+  @override
+  Widget build(BuildContext context) {
+    String statusText = 'Đang kết nối...';
+    IconData statusIcon = Icons.handshake_outlined;
+    Color statusColor = Colors.blue;
+
+    if (req.status == 'accepted') {
+      statusText = 'Đã có đội cứu hộ tiếp nhận';
+      statusIcon = Icons.check_circle;
+    } else if (req.status == 'processing') {
+      statusText = 'Cứu hộ đang di chuyển tới';
+      statusIcon = Icons.directions_car_filled;
+    } else if (req.status == 'arrived') {
+      statusText = 'Cứu hộ đã tới hiện trường';
+      statusIcon = Icons.location_on;
+      statusColor = Colors.green;
+    }
+
+    return ListView(
+      key: const ValueKey('tracking'),
+      padding: const EdgeInsets.all(28),
+      children: [
+        const SizedBox(height: 10),
+        Center(
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            decoration: BoxDecoration(color: statusColor.withValues(alpha: 0.1), borderRadius: BorderRadius.circular(20)),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(statusIcon, size: 18, color: statusColor),
+                const SizedBox(width: 8),
+                Text(statusText, style: TextStyle(color: statusColor, fontWeight: FontWeight.bold, fontSize: 13)),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 32),
+        Text(req.garageName ?? 'Đơn vị cứu hộ', style: T.h2(context), textAlign: TextAlign.center),
+        const SizedBox(height: 8),
+        Text('Mã đơn: ${req.id.substring(0, 8).toUpperCase()}', style: T.caption(context), textAlign: TextAlign.center),
+        
+        const SizedBox(height: 48),
+        _trackingMapPlaceholder(context),
+        
+        const SizedBox(height: 48),
+        AppCard(
+          child: Column(children: [
+            _row(context, 'Thợ xử lý', req.rescuerName ?? 'Kỹ thuật viên'),
+            _row(context, 'Khoảng cách', _calcRescuerDist()),
+            _row(context, 'Thời gian tới', 'Dự kiến 10-15 phút'),
+          ]),
+        ),
+        
+        const SizedBox(height: 40),
+        Column(children: [
+          _callRescuerButton(context),
+          const SizedBox(height: 12),
+          AppButton(
+            'Gọi cứu hộ 116 (Dự phòng)', 
+            tone: Tone.soft,
+            icon: Icons.support_agent, 
+            height: 48, 
+            onTap: () => callPhone(context, '0896116116')
+          ),
+          const SizedBox(height: 16),
+          AppButton(
+            'Lập hồ sơ bảo hiểm', 
+            tone: Tone.ghost, 
+            icon: Icons.verified_user_outlined, 
+            height: 52, 
+            onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => InsuranceReportScreen(initialSOS: req)))
+          ),
+        ]),
+        const SizedBox(height: 20),
+        if (req.status == 'arrived')
+          AppButton('Xác nhận hoàn thành', tone: Tone.brand, onTap: () => FirebaseService.updateSOSStatus(req.id, 'done'))
+        else
+          AppButton('Hủy yêu cầu', tone: Tone.ghost, onTap: () async {
+            final ok = await showDialog<bool>(context: context, builder: (c) => AlertDialog(title: const Text('Hủy cứu hộ?'), content: const Text('Bạn có chắc chắn muốn hủy yêu cầu cứu hộ này không?'), actions: [TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('Không')), TextButton(onPressed: () => Navigator.pop(c, true), child: const Text('Hủy ngay', style: TextStyle(color: Colors.red)))]));
+            if (ok == true) FirebaseService.cancelSOS(req.id);
+          }),
+      ],
+    );
+  }
+
+  Widget _callRescuerButton(BuildContext context) {
+    final String label = req.rescuerPhone != null && req.rescuerPhone!.isNotEmpty 
+        ? 'Gọi Gara ${req.garageName ?? ""}' 
+        : 'Chưa có số liên hệ';
+    
+    return Material(
+      color: req.rescuerPhone != null ? C.brand(context) : Colors.grey.shade400,
+      borderRadius: BorderRadius.circular(16),
+      child: InkWell(
+        onTap: req.rescuerPhone != null ? () => callPhone(context, req.rescuerPhone!) : null,
+        borderRadius: BorderRadius.circular(16),
+        child: Container(
+          height: 56,
+          padding: const EdgeInsets.symmetric(horizontal: 20),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(Icons.phone_forwarded, color: Colors.white, size: 20),
+              const SizedBox(width: 12),
+              Flexible(
+                child: Text(
+                  label.toUpperCase(),
+                  style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _trackingMapPlaceholder(BuildContext context) {
+    final bool hasRescuerPos = req.rescuerLat != null && req.rescuerLng != null;
+    
+    return Container(
+      height: 220,
+      decoration: BoxDecoration(
+        color: Colors.grey.shade100,
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: C.line(context)),
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(24),
+        child: Stack(
+          alignment: Alignment.center,
+          children: [
+            Container(color: const Color(0xFFF0F2F5)),
+            const Icon(Icons.map_outlined, size: 64, color: Colors.white),
+            
+            if (hasRescuerPos) ...[
+              const Positioned(
+                child: Icon(Icons.location_on, color: Colors.red, size: 32),
+              ),
+              _animatedRescuerMarker(),
+            ],
+
+            Positioned(
+              bottom: 16,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(12), boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 4)]),
+                child: Text(
+                  hasRescuerPos ? 'Đang chia sẻ vị trí cứu hộ...' : 'Đang đợi tín hiệu GPS từ cứu hộ...',
+                  style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold),
+                ),
+              ),
+            )
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _animatedRescuerMarker() {
+    return TweenAnimationBuilder<double>(
+      tween: Tween<double>(begin: 0, end: 1),
+      duration: const Duration(seconds: 2),
+      builder: (context, val, child) {
+        return Align(
+          alignment: const Alignment(-0.4, -0.4), 
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                padding: const EdgeInsets.all(4),
+                decoration: BoxDecoration(
+                  color: Colors.blue, 
+                  shape: BoxShape.circle,
+                  boxShadow: [BoxShadow(color: Colors.blue.withValues(alpha: 0.3), blurRadius: 10 * val, spreadRadius: 5 * val)]
+                ),
+                child: const Icon(Icons.directions_car, color: Colors.white, size: 16),
+              ),
+              Container(
+                margin: const EdgeInsets.only(top: 2),
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                decoration: BoxDecoration(color: Colors.blue, borderRadius: BorderRadius.circular(4)),
+                child: const Text('Cứu hộ', style: TextStyle(color: Colors.white, fontSize: 8, fontWeight: FontWeight.bold)),
+              )
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  String _calcRescuerDist() {
+    if (req.rescuerLat == null || req.rescuerLng == null) return 'Đang tính...';
+    final d = Geolocator.distanceBetween(req.latitude, req.longitude, req.rescuerLat!, req.rescuerLng!) / 1000;
+    return '${d.toStringAsFixed(1)} km';
+  }
+
+  Widget _row(BuildContext context, String k, String v) => Padding(padding: const EdgeInsets.symmetric(vertical: 8), child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Text(k, style: T.caption(context)), Text(v, style: T.small(context).copyWith(fontWeight: FontWeight.bold))]));
 }
 
 class _WaitingView extends StatefulWidget {
@@ -282,6 +560,7 @@ class _WaitingViewState extends State<_WaitingView> {
   @override
   Widget build(BuildContext context) {
     return ListView(
+      key: const ValueKey('waiting'),
       padding: const EdgeInsets.all(28),
       children: [
         Center(child: Text(_ex ? 'Đang mở rộng phạm vi tìm kiếm...' : 'Đang tìm đơn vị cứu hộ...', style: T.small(context).copyWith(fontWeight: FontWeight.bold))),
@@ -296,7 +575,6 @@ class _WaitingViewState extends State<_WaitingView> {
           ]),
         ),
         const SizedBox(height: 40),
-        // SỬA AN TOÀN: Bỏ FittedBox, rút gọn nhãn, thêm hotline bên dưới
         AppButton('Gọi cứu hộ 116', tone: Tone.soft, icon: Icons.phone, height: 52, onTap: () => callPhone(context, '0896116116')),
         const SizedBox(height: 8),
         const Center(child: Text('Hotline: 0896.116.116', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: Colors.grey))),
@@ -319,4 +597,105 @@ class _WaitingViewState extends State<_WaitingView> {
   }
 
   Widget _row(String k, String v) => Padding(padding: const EdgeInsets.symmetric(vertical: 6), child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Text(k, style: T.caption(context)), Text(v, style: T.small(context).copyWith(fontWeight: FontWeight.bold))]));
+}
+
+class _RatingScreen extends StatefulWidget {
+  final SOSRequest req;
+  const _RatingScreen({required this.req});
+  @override
+  State<_RatingScreen> createState() => _RatingScreenState();
+}
+
+class _RatingScreenState extends State<_RatingScreen> {
+  double _stars = 5;
+  final _commentCtrl = TextEditingController();
+  final List<String> _selectedTags = [];
+  bool _loading = false;
+
+  final _allTags = ['Đúng giờ', 'Chuyên nghiệp', 'Giá hợp lý', 'Thân thiện', 'Cẩn thận'];
+
+  void _submit() async {
+    setState(() => _loading = true);
+    try {
+      await FirebaseService.submitRating(
+        sosId: widget.req.id,
+        rescuerId: widget.req.rescuerId!,
+        stars: _stars,
+        comment: _commentCtrl.text.trim(),
+        tags: _selectedTags,
+      );
+      await FirebaseService.db.collection('sos_requests').doc(widget.req.id).update({'status': 'rated'});
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Lỗi: $e')));
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: C.bg(context),
+      body: ListView(
+        padding: const EdgeInsets.all(28),
+        children: [
+          const SizedBox(height: 60),
+          const Center(child: Icon(Icons.check_circle, size: 80, color: Colors.green)),
+          const SizedBox(height: 24),
+          Text('Cứu hộ thành công!', style: T.h2(context), textAlign: TextAlign.center),
+          const SizedBox(height: 8),
+          Text('Bạn hãy dành chút thời gian đánh giá cho ${widget.req.garageName ?? "thợ cứu hộ"} nhé.', textAlign: TextAlign.center, style: T.body(context, Colors.grey)),
+          const SizedBox(height: 48),
+
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: List.generate(5, (index) => IconButton(
+              icon: Icon(index < _stars ? Icons.star : Icons.star_border, size: 40, color: Colors.orange),
+              onPressed: () => setState(() => _stars = index + 1.0),
+            )),
+          ),
+          const SizedBox(height: 32),
+
+          Wrap(
+            alignment: WrapAlignment.center,
+            spacing: 8,
+            runSpacing: 8,
+            children: _allTags.map((tag) {
+              final isSelected = _selectedTags.contains(tag);
+              return FilterChip(
+                label: Text(tag),
+                selected: isSelected,
+                onSelected: (val) {
+                  setState(() {
+                    if (val) _selectedTags.add(tag);
+                    else _selectedTags.remove(tag);
+                  });
+                },
+                selectedColor: C.brandBg(context),
+                checkmarkColor: C.brand(context),
+              );
+            }).toList(),
+          ),
+          const SizedBox(height: 32),
+
+          TextField(
+            controller: _commentCtrl,
+            maxLines: 3,
+            decoration: InputDecoration(
+              hintText: 'Nhận xét thêm của bạn...',
+              border: OutlineInputBorder(borderRadius: BorderRadius.circular(16)),
+            ),
+          ),
+          const SizedBox(height: 48),
+
+          if (_loading) const Center(child: CircularProgressIndicator())
+          else Column(children: [
+            AppButton('GỬI ĐÁNH GIÁ', onTap: _submit),
+            const SizedBox(height: 16),
+            TextButton(onPressed: () => FirebaseService.db.collection('sos_requests').doc(widget.req.id).update({'status': 'rated'}), child: Text('Bỏ qua', style: TextStyle(color: Colors.grey.shade400))),
+          ]),
+        ],
+      ),
+    );
+  }
 }

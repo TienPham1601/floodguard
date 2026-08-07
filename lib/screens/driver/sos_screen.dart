@@ -612,7 +612,7 @@ class _RatingScreenState extends State<_RatingScreen> {
   final List<String> _selectedTags = [];
   bool _loading = false;
 
-  final _allTags = ['Đúng giờ', 'Chuyên nghiệp', 'Giá hợp lý', 'Thân thiện', 'Cẩn thận'];
+  final _allTags = ['Đúng giờ', 'Chuyên nghiệp', 'Giá hợp lý', 'Thân thiện', 'Nhiệt tình'];
 
   void _submit() async {
     setState(() => _loading = true);
@@ -624,6 +624,7 @@ class _RatingScreenState extends State<_RatingScreen> {
         comment: _commentCtrl.text.trim(),
         tags: _selectedTags,
       );
+      // Đổi status sang rated để không hiện lại màn này
       await FirebaseService.db.collection('sos_requests').doc(widget.req.id).update({'status': 'rated'});
     } catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Lỗi: $e')));
@@ -634,67 +635,89 @@ class _RatingScreenState extends State<_RatingScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final currencyFormat = NumberFormat.currency(locale: 'vi_VN', symbol: 'đ');
+    
     return Scaffold(
       backgroundColor: C.bg(context),
-      body: ListView(
-        padding: const EdgeInsets.all(28),
-        children: [
-          const SizedBox(height: 60),
-          const Center(child: Icon(Icons.check_circle, size: 80, color: Colors.green)),
-          const SizedBox(height: 24),
-          Text('Cứu hộ thành công!', style: T.h2(context), textAlign: TextAlign.center),
-          const SizedBox(height: 8),
-          Text('Bạn hãy dành chút thời gian đánh giá cho ${widget.req.garageName ?? "thợ cứu hộ"} nhé.', textAlign: TextAlign.center, style: T.body(context, Colors.grey)),
-          const SizedBox(height: 48),
+      body: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 400),
+          child: ListView(
+            padding: const EdgeInsets.all(28),
+            shrinkWrap: true,
+            children: [
+              const Center(child: Icon(Icons.check_circle, size: 80, color: Colors.green)),
+              const SizedBox(height: 24),
+              Text('Cứu hộ thành công!', style: T.h2(context), textAlign: TextAlign.center),
+              const SizedBox(height: 12),
+              AppCard(
+                color: Colors.grey.shade50,
+                child: Column(children: [
+                  Text(widget.req.garageName ?? 'Đơn vị cứu hộ', style: const TextStyle(fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 4),
+                  Text('Thợ: ${widget.req.rescuerName ?? "Kỹ thuật viên"}', style: T.caption(context)),
+                  const Divider(height: 24),
+                  Text('Giá đã thanh toán: ${currencyFormat.format(widget.req.quotedPrice ?? 0)}', 
+                      style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.blue)),
+                ]),
+              ),
+              const SizedBox(height: 32),
+              Text('Bạn đánh giá thế nào về dịch vụ?', textAlign: TextAlign.center, style: T.body(context)),
+              const SizedBox(height: 16),
 
-          Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: List.generate(5, (index) => IconButton(
-              icon: Icon(index < _stars ? Icons.star : Icons.star_border, size: 40, color: Colors.orange),
-              onPressed: () => setState(() => _stars = index + 1.0),
-            )),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: List.generate(5, (index) => IconButton(
+                  icon: Icon(index < _stars ? Icons.star : Icons.star_border, size: 44, color: Colors.orange),
+                  onPressed: () => setState(() => _stars = index + 1.0),
+                ).animate(target: index < _stars ? 1 : 0).scale(begin: const Offset(1,1), end: const Offset(1.2, 1.2))),
+              ),
+              const SizedBox(height: 32),
+
+              Wrap(
+                alignment: WrapAlignment.center,
+                spacing: 8,
+                runSpacing: 8,
+                children: _allTags.map((tag) {
+                  final isSelected = _selectedTags.contains(tag);
+                  return ChoiceChip(
+                    label: Text(tag),
+                    selected: isSelected,
+                    onSelected: (val) {
+                      setState(() {
+                        if (val) _selectedTags.add(tag);
+                        else _selectedTags.remove(tag);
+                      });
+                    },
+                    selectedColor: C.brandBg(context),
+                    labelStyle: TextStyle(color: isSelected ? C.brand(context) : Colors.grey),
+                  );
+                }).toList(),
+              ),
+              const SizedBox(height: 32),
+
+              TextField(
+                controller: _commentCtrl,
+                maxLines: 3,
+                decoration: InputDecoration(
+                  hintText: 'Nhận xét thêm của bạn...',
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(16)),
+                  filled: true,
+                  fillColor: Colors.white,
+                ),
+              ),
+              const SizedBox(height: 48),
+
+              if (_loading) const Center(child: CircularProgressIndicator())
+              else Column(children: [
+                AppButton('GỬI ĐÁNH GIÁ', onTap: _submit),
+                const SizedBox(height: 16),
+                TextButton(onPressed: () => FirebaseService.db.collection('sos_requests').doc(widget.req.id).update({'status': 'rated'}), 
+                    child: Text('Bỏ qua', style: TextStyle(color: Colors.grey.shade400))),
+              ]),
+            ],
           ),
-          const SizedBox(height: 32),
-
-          Wrap(
-            alignment: WrapAlignment.center,
-            spacing: 8,
-            runSpacing: 8,
-            children: _allTags.map((tag) {
-              final isSelected = _selectedTags.contains(tag);
-              return FilterChip(
-                label: Text(tag),
-                selected: isSelected,
-                onSelected: (val) {
-                  setState(() {
-                    if (val) _selectedTags.add(tag);
-                    else _selectedTags.remove(tag);
-                  });
-                },
-                selectedColor: C.brandBg(context),
-                checkmarkColor: C.brand(context),
-              );
-            }).toList(),
-          ),
-          const SizedBox(height: 32),
-
-          TextField(
-            controller: _commentCtrl,
-            maxLines: 3,
-            decoration: InputDecoration(
-              hintText: 'Nhận xét thêm của bạn...',
-              border: OutlineInputBorder(borderRadius: BorderRadius.circular(16)),
-            ),
-          ),
-          const SizedBox(height: 48),
-
-          if (_loading) const Center(child: CircularProgressIndicator())
-          else Column(children: [
-            AppButton('GỬI ĐÁNH GIÁ', onTap: _submit),
-            const SizedBox(height: 16),
-            TextButton(onPressed: () => FirebaseService.db.collection('sos_requests').doc(widget.req.id).update({'status': 'rated'}), child: Text('Bỏ qua', style: TextStyle(color: Colors.grey.shade400))),
-          ]),
-        ],
+        ),
       ),
     );
   }

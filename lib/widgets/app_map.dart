@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:ui';
 import 'dart:math';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_map/flutter_map.dart' as fm;
 import 'package:flutter_map_cancellable_tile_provider/flutter_map_cancellable_tile_provider.dart';
 import 'package:latlong2/latlong.dart';
@@ -100,13 +101,23 @@ class AppMapState extends State<AppMap> {
     super.didUpdateWidget(oldWidget);
     if (widget.target == null && oldWidget.target != null) _clearRoute();
     if (widget.target != null && (oldWidget.target == null || widget.target?.pos != oldWidget.target?.pos)) {
-      _isNavigating = false;
       _loadSmartRoute();
     }
   }
 
+  void _setNavigating(bool val, String reason) {
+    if (_isNavigating != val) {
+      debugPrint('NAV_STATE: Changed to $val. Reason: $reason');
+      setState(() => _isNavigating = val);
+    }
+  }
+
   void _clearRoute() {
-    setState(() { _currentRoute = null; _isNavigating = false; _currentSpeed = 0; });
+    setState(() { 
+      _currentRoute = null; 
+      _currentSpeed = 0; 
+    });
+    _setNavigating(false, 'Clear route');
     _positionStream?.cancel();
     _mapController.rotate(0);
     if (_currentPos != null) _mapController.move(_currentPos!, 14.5);
@@ -153,16 +164,12 @@ class AppMapState extends State<AppMap> {
         return [LatLng(z.center.latitude - d, z.center.longitude - d), LatLng(z.center.latitude + d, z.center.longitude - d), LatLng(z.center.latitude + d, z.center.longitude + d), LatLng(z.center.latitude - d, z.center.longitude + d), LatLng(z.center.latitude - d, z.center.longitude - d)];
       }).toList();
       
-      // ORS: [longitude, latitude]
       final route = await RoutingService.fetchRoute(_currentPos!, currentTarget.pos, avoidPolygons: avoidPolys);
       if (mounted) {
         setState(() { _currentRoute = route; _loadingRoute = false; _currentStepIdx = 0; });
         if (route != null) {
           _fitBounds(route.points);
-          if (widget.isRescuerMode) {
-            // Check if request is already accepted, if so auto start nav
-            _checkAndAutoStartNav(currentTarget);
-          }
+          // VIỆC 1: KHÔNG tự động bật dẫn đường cho rescuer khi load route nữa.
         }
       }
     } catch (e) {
@@ -170,15 +177,10 @@ class AppMapState extends State<AppMap> {
     }
   }
 
-  void _checkAndAutoStartNav(MapTarget target) async {
-    // If we're already accepted this target, start nav
-    // For now we just start nav if it's rescuer mode and target is set
-    _startNavigation();
-  }
-
   void _startNavigation() {
     if (_currentRoute == null) return;
-    setState(() { _isNavigating = true; _currentStepIdx = 0; });
+    _setNavigating(true, 'Explicit start');
+    _positionStream?.cancel();
     _positionStream = Geolocator.getPositionStream(locationSettings: const LocationSettings(accuracy: LocationAccuracy.high, distanceFilter: 5)).listen((p) {
       if (!mounted) return;
       final latlng = LatLng(p.latitude, p.longitude);
@@ -188,6 +190,15 @@ class AppMapState extends State<AppMap> {
         final dist = Geolocator.distanceBetween(latlng.latitude, latlng.longitude, nearest.latitude, nearest.longitude);
         if (dist > 50) {
           _loadSmartRoute();
+        }
+
+        // VIỆC 2: TỰ NHẬN BIẾT ĐÃ TỚI NƠI (< 100m)
+        final MapTarget? target = widget.target ?? ORSNavigation.target.value;
+        if (target != null) {
+          final distToTarget = Geolocator.distanceBetween(latlng.latitude, latlng.longitude, target.pos.latitude, target.pos.longitude);
+          if (distToTarget < 100 && _isNavigating && widget.isRescuerMode) {
+             _checkArrivedPrompt(target.pos);
+          }
         }
       }
 
@@ -200,6 +211,40 @@ class AppMapState extends State<AppMap> {
         _updateRescuerGPSInFirestore(latlng);
       }
     });
+  }
+
+  DateTime? _lastArrivedPrompt;
+  void _checkArrivedPrompt(LatLng targetPos) async {
+    if (_lastArrivedPrompt != null && DateTime.now().difference(_lastArrivedPrompt!).inMinutes < 2) return;
+    
+    _lastArrivedPrompt = DateTime.now();
+    HapticFeedback.vibrate();
+    
+    final arrived = await showDialog<bool>(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Text('Bạn đã tới hiện trường?'),
+        content: const Text('Hệ thống nhận thấy bạn đã ở rất gần vị trí xe cần cứu hộ.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('Chưa tới')),
+          ElevatedButton(onPressed: () => Navigator.pop(c, true), child: const Text('Đã tới nơi')),
+        ],
+      ),
+    );
+
+    if (arrived == true) {
+      final user = FirebaseService.auth.currentUser;
+      if (user != null) {
+        final snap = await FirebaseService.db.collection('sos_requests')
+            .where('rescuerId', isEqualTo: user.uid)
+            .where('status', isEqualTo: 'processing')
+            .limit(1).get();
+        if (snap.docs.isNotEmpty) {
+          await FirebaseService.updateSOSStatus(snap.docs.first.id, 'arrived');
+          _clearRoute();
+        }
+      }
+    }
   }
 
   LatLng _getNearestPointOnRoute(LatLng p, List<LatLng> route) {
@@ -306,7 +351,7 @@ class AppMapState extends State<AppMap> {
                 return fm.MarkerLayer(markers: reps.map((r) => fm.Marker(point: LatLng(r.latitude, r.longitude), width: 48, height: 48, child: GestureDetector(onTap: () => _showFloodDetailPopup(r), child: Container(padding: const EdgeInsets.all(8), decoration: BoxDecoration(color: Colors.blue.shade600, shape: BoxShape.circle, border: Border.all(color: Colors.white, width: 2.5), boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 8)]), child: const Icon(Icons.camera_alt, color: Colors.white, size: 18))))).toList());
               },
             ),
-            if (_currentRoute != null) fm.PolylineLayer(polylines: [fm.Polyline(points: _currentRoute!.points, color: C.brand(context), strokeWidth: 5.5)]),
+            if (_currentRoute != null && _isNavigating) fm.PolylineLayer(polylines: [fm.Polyline(points: _currentRoute!.points, color: C.brand(context), strokeWidth: 5.5)]),
             fm.MarkerLayer(markers: [
               if (_currentPos != null) fm.Marker(point: _currentPos!, width: 55, height: 55, child: Transform.rotate(angle: _currentHeading * (pi/180), child: Icon(_isNavigating ? Icons.navigation : Icons.person_pin_circle, color: Colors.blue.shade700, size: 42))),
               ...widget.markers,
@@ -334,16 +379,15 @@ class AppMapState extends State<AppMap> {
   }
 
   void _showSOSDetail(SOSRequest r) async {
-    // 1. VẼ LUÔN ROUTE 
-    if (widget.isRescuerMode && _currentPos != null) {
-      ORSNavigation.target.value = MapTarget(name: r.vehiclePlate, subtitle: r.vehicleModel, pos: LatLng(r.latitude, r.longitude));
-    }
+    // VIỆC 1: KHÔNG vẽ route khi bấm marker nữa
     String distText = '...';
     String timeText = '...';
     if (_currentPos != null) {
-      final route = await RoutingService.fetchRoute(_currentPos!, LatLng(r.latitude, r.longitude));
-      if (route != null) { distText = route.distanceText; timeText = route.durationText; }
+       final d = Geolocator.distanceBetween(_currentPos!.latitude, _currentPos!.longitude, r.latitude, r.longitude) / 1000;
+       distText = d < 1 ? '${(d*1000).round()} m' : '${d.toStringAsFixed(1)} km';
+       timeText = '${(d * 2.5).round() + 2} phút';
     }
+    
     if (!mounted) return;
     showModalBottomSheet(
       context: context, isScrollControlled: true, shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(28))),
@@ -367,7 +411,11 @@ class AppMapState extends State<AppMap> {
                 Navigator.push(context, MaterialPageRoute(builder: (_) => QuoteInputScreen(req: r, distText: distText, timeText: timeText)));
               })
             else
-              AppButton('BẮT ĐẦU CHỈ ĐƯỜNG', height: 58, icon: Icons.navigation, onTap: () { Navigator.pop(ctx); _startNavigation(); }),
+              AppButton('DẪN ĐƯỜNG TRÊN BẢN ĐỒ', height: 58, icon: Icons.navigation, onTap: () {
+                Navigator.pop(ctx);
+                ORSNavigation.target.value = MapTarget(name: r.vehiclePlate, subtitle: r.vehicleModel, pos: LatLng(r.latitude, r.longitude));
+                _startNavigation();
+              }),
           ],
         ]),
       ),

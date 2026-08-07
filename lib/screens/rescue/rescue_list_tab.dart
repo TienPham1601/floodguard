@@ -3,7 +3,6 @@ import 'package:flutter/material.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:intl/intl.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import '../../theme.dart';
 import '../../ui.dart';
 import '../../utils.dart';
@@ -16,20 +15,37 @@ class RescueListTab extends StatefulWidget {
   const RescueListTab({super.key, required this.myPos});
 
   @override
-  State<RescueListTab> createState() => _RescueListTabState();
+  State<RescueListTab> createState() => RescueListTabState();
 }
 
-class _RescueListTabState extends State<RescueListTab> {
-  late Stream<List<SOSRequest>> _sosStream;
+class RescueListTabState extends State<RescueListTab> with SingleTickerProviderStateMixin {
+  late final Stream<List<SOSRequest>> _newStream;
+  late final Stream<List<SOSRequest>> _activeStream;
+  late TabController _tabController;
+  
   double _radius = 15.0;
-  bool _loading = true;
+  bool _loadingProfile = true;
 
   @override
   void initState() {
     super.initState();
-    // Khởi tạo stream một lần duy nhất (Việc 3b)
-    _sosStream = FirebaseService.streamActiveSOS(isRescuer: true);
+    _tabController = TabController(length: 2, vsync: this);
+    
+    // Khởi tạo stream MỘT LẦN duy nhất trong initState (Fix Lỗi 1)
+    _newStream = FirebaseService.streamActiveSOS(isRescuer: true);
+    _activeStream = FirebaseService.streamProcessingSOS();
+    
     _initData();
+  }
+
+  @override
+  void dispose() {
+    _tabController.dispose();
+    super.dispose();
+  }
+
+  void switchTab(int index) {
+    if (mounted) _tabController.animateTo(index);
   }
 
   Future<void> _initData() async {
@@ -37,7 +53,7 @@ class _RescueListTabState extends State<RescueListTab> {
     if (mounted) {
       setState(() {
         _radius = (prof?['serviceRadius'] as num?)?.toDouble() ?? 15.0;
-        _loading = false;
+        _loadingProfile = false;
       });
     }
     FirebaseService.cleanupExpiredSOS();
@@ -45,32 +61,35 @@ class _RescueListTabState extends State<RescueListTab> {
 
   @override
   Widget build(BuildContext context) {
-    if (_loading) return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    if (_loadingProfile) {
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    }
 
-    return DefaultTabController(
-      length: 2,
-      child: Scaffold(
-        appBar: AppBar(
-          title: const Text('Điều hành cứu hộ'),
-          bottom: TabBar(
-            indicatorColor: C.brand(context),
-            labelStyle: T.title(context).copyWith(fontSize: 14),
-            tabs: const [
-              Tab(text: 'Yêu cầu mới'),
-              Tab(text: 'Đang xử lý'),
-            ],
-          ),
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Điều hành cứu hộ'),
+        bottom: TabBar(
+          controller: _tabController,
+          indicatorColor: C.brand(context),
+          labelStyle: T.title(context).copyWith(fontSize: 14),
+          tabs: const [
+            Tab(text: 'Yêu cầu mới'),
+            Tab(text: 'Đang xử lý'),
+          ],
         ),
-        body: TabBarView(children: [
-          _List(status: 'pending', myPos: widget.myPos, radius: _radius, stream: _sosStream),
-          _List(status: 'active', myPos: widget.myPos, radius: _radius, stream: _sosStream),
-        ]),
+      ),
+      body: TabBarView(
+        controller: _tabController,
+        children: [
+          _List(status: 'pending', myPos: widget.myPos, radius: _radius, stream: _newStream),
+          _List(status: 'active', myPos: widget.myPos, radius: _radius, stream: _activeStream),
+        ],
       ),
     );
   }
 }
 
-class _List extends StatelessWidget {
+class _List extends StatefulWidget {
   final String status;
   final LatLng myPos;
   final double radius;
@@ -79,55 +98,128 @@ class _List extends StatelessWidget {
   const _List({required this.status, required this.myPos, required this.radius, required this.stream});
 
   @override
+  State<_List> createState() => _ListState();
+}
+
+class _ListState extends State<_List> with AutomaticKeepAliveClientMixin {
+  bool _hasInitialData = false;
+  Timer? _timeoutTimer;
+  bool _isTimedOut = false;
+
+  @override
+  bool get wantKeepAlive => true; 
+
+  @override
+  void initState() {
+    super.initState();
+    _startTimeout();
+  }
+
+  void _startTimeout() {
+    _isTimedOut = false;
+    _timeoutTimer?.cancel();
+    _timeoutTimer = Timer(const Duration(seconds: 5), () {
+      if (mounted && !_hasInitialData) {
+        setState(() => _isTimedOut = true);
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _timeoutTimer?.cancel();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    debugPrint('LIST build: status=$status'); // Việc 3 - Debug build
+    super.build(context);
+    
     return StreamBuilder<List<SOSRequest>>(
-      stream: stream,
+      stream: widget.stream,
       builder: (context, snapshot) {
-        // Việc 3a, 3c: Xử lý loading và rỗng chuẩn xác
-        if (snapshot.connectionState == ConnectionState.waiting && !snapshot.hasData) {
-          return const Center(child: CircularProgressIndicator());
+        // Log debug theo yêu cầu (Việc 1 - Bước 1)
+        if (widget.status == 'active') {
+          debugPrint('PROCESSING: connState=${snapshot.connectionState} hasData=${snapshot.hasData} hasError=${snapshot.hasError} docs=${snapshot.data?.length}');
+          if (snapshot.hasError) debugPrint('PROCESSING ERROR: ${snapshot.error}');
         }
 
         if (snapshot.hasError) {
           return Center(child: Padding(
             padding: const EdgeInsets.all(24),
-            child: Text('Lỗi kết nối: ${snapshot.error}', textAlign: TextAlign.center, style: const TextStyle(color: Colors.red)),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.error_outline, color: Colors.red, size: 40),
+                const SizedBox(height: 16),
+                Text('Lỗi tải dữ liệu: ${snapshot.error}', textAlign: TextAlign.center, style: const TextStyle(color: Colors.red)),
+                const SizedBox(height: 16),
+                AppButton('Thử lại', tone: Tone.soft, full: false, onTap: () {
+                  setState(() { _hasInitialData = false; _isTimedOut = false; });
+                  _startTimeout();
+                }),
+              ],
+            ),
           ));
         }
-        
-        var list = snapshot.data ?? [];
-        final user = FirebaseAuth.instance.currentUser;
-        
-        if (status == 'pending') {
-          list = list.where((r) => ['pending', 'expanded', 'quoted'].contains(r.status)).toList();
-          if (myPos.latitude != 0) {
-            list = list.where((r) {
-              final d = Geolocator.distanceBetween(myPos.latitude, myPos.longitude, r.latitude, r.longitude) / 1000;
-              return d <= radius;
-            }).toList();
-          }
-        } else {
-          list = list.where((r) => (r.status == 'accepted' || r.status == 'processing' || r.status == 'arrived') && r.rescuerId == user?.uid).toList();
+
+        if (snapshot.hasData) {
+          _hasInitialData = true;
+          return _buildContent(snapshot.data!);
         }
 
-        if (list.isEmpty) {
-          return Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-            Icon(Icons.inbox_outlined, size: 48, color: Colors.grey.shade200),
-            const SizedBox(height: 12),
-            Text(status == 'pending' ? 'Chưa có yêu cầu cứu hộ nào.' : 'Bạn chưa nhận yêu cầu nào.', style: const TextStyle(color: Colors.grey)),
-          ]));
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          if (_isTimedOut) return _buildEmptyState();
+          return const Center(child: CircularProgressIndicator());
         }
 
-        return ListView.builder(
-          padding: const EdgeInsets.all(16),
-          itemCount: list.length,
-          itemBuilder: (c, i) => status == 'pending' 
-            ? _SOSCard(req: list[i], myPos: myPos)
-            : _ActiveTaskCard(req: list[i], myPos: myPos),
-        );
+        return _buildEmptyState();
       },
     );
+  }
+
+  Widget _buildContent(List<SOSRequest> allRequests) {
+    var list = List<SOSRequest>.from(allRequests);
+    
+    if (widget.status == 'pending') {
+      // Tab yêu cầu mới: lọc đơn chưa nhận/mới báo giá
+      list = list.where((r) => ['pending', 'expanded', 'quoted'].contains(r.status)).toList();
+      if (widget.myPos.latitude != 0) {
+        list = list.where((r) {
+          final d = Geolocator.distanceBetween(widget.myPos.latitude, widget.myPos.longitude, r.latitude, r.longitude) / 1000;
+          return d <= widget.radius;
+        }).toList();
+      }
+    } else {
+      // Tab đang xử lý: FirebaseService.streamProcessingSOS đã lọc rescuerId và status active
+      // list = list; // Giữ nguyên kết quả từ stream
+    }
+
+    if (list.isEmpty) return _buildEmptyState();
+
+    return ListView.builder(
+      padding: const EdgeInsets.all(16),
+      itemCount: list.length,
+      itemBuilder: (c, i) => widget.status == 'pending' 
+        ? _SOSCard(req: list[i], myPos: widget.myPos)
+        : _ActiveTaskCard(req: list[i], myPos: widget.myPos),
+    );
+  }
+
+  Widget _buildEmptyState() {
+    return Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+      Icon(Icons.inbox_outlined, size: 48, color: Colors.grey.shade200),
+      const SizedBox(height: 12),
+      Text(
+        widget.status == 'pending' ? 'Chưa có yêu cầu cứu hộ nào.' : 'Bạn chưa nhận yêu cầu nào.', 
+        style: const TextStyle(color: Colors.grey)
+      ),
+      if (_isTimedOut && !_hasInitialData) 
+        Padding(
+          padding: const EdgeInsets.all(16),
+          child: Text('Đang đợi phản hồi từ máy chủ...', style: TextStyle(fontSize: 12, color: Colors.grey.shade400)),
+        )
+    ]));
   }
 }
 
@@ -147,26 +239,14 @@ class _ActiveTaskCardState extends State<_ActiveTaskCard> {
   Timer? _routeRefreshTimer;
   LatLng? _lastCalculatedPos;
   bool _isDisposed = false;
-  StreamSubscription? _statusSub;
 
   @override
   void initState() {
     super.initState();
     _calcRoute();
-    _startTracking();
+    _startLocationSharing();
     _routeRefreshTimer = Timer.periodic(const Duration(seconds: 45), (t) {
       if (!_isDisposed) _calcRoute();
-    });
-
-    // Việc 2: Lắng nghe realtime trạng thái đơn để đồng bộ khi user hủy
-    _statusSub = FirebaseService.db.collection('sos_requests').doc(widget.req.id).snapshots().listen((snap) {
-      if (!snap.exists || snap.data()?['status'] == 'cancelled' || snap.data()?['status'] == 'timeout') {
-         if (mounted) {
-           ScaffoldMessenger.of(context).showSnackBar(
-             const SnackBar(content: Text('Yêu cầu đã bị hủy hoặc hết hiệu lực.'), backgroundColor: Colors.orange)
-           );
-         }
-      }
     });
   }
 
@@ -175,11 +255,10 @@ class _ActiveTaskCardState extends State<_ActiveTaskCard> {
     _isDisposed = true;
     _locationTimer?.cancel();
     _routeRefreshTimer?.cancel();
-    _statusSub?.cancel();
     super.dispose();
   }
 
-  void _startTracking() {
+  void _startLocationSharing() {
     _locationTimer = Timer.periodic(const Duration(seconds: 20), (t) async {
       if (widget.req.status == 'processing' && !_isDisposed) {
         try {
@@ -209,10 +288,14 @@ class _ActiveTaskCardState extends State<_ActiveTaskCard> {
 
   @override
   Widget build(BuildContext context) {
-    debugPrint('PROCESSING build: ${DateTime.now().millisecondsSinceEpoch}');
     final req = widget.req;
     final bool isArrived = req.status == 'arrived';
     final bool isProcessing = req.status == 'processing';
+
+    final bool isKm = _distText?.contains('km') ?? true;
+    final String distLabel = isKm ? 'km còn lại' : 'còn lại';
+    final String timeVal = _timeText?.replaceAll(' phút', '') ?? '...';
+    final String timeDisplay = (timeVal == '0' || timeVal == '...') ? 'dưới 1' : timeVal;
 
     return AppCard(
       margin: const EdgeInsets.only(bottom: 20),
@@ -238,9 +321,9 @@ class _ActiveTaskCardState extends State<_ActiveTaskCard> {
           padding: const EdgeInsets.all(16),
           decoration: BoxDecoration(color: Colors.blue.shade50, borderRadius: BorderRadius.circular(16)),
           child: Row(mainAxisAlignment: MainAxisAlignment.spaceAround, children: [
-            _statItem('km còn lại', _distText ?? '...'),
+            _statItem(distLabel, _distText ?? '...'),
             Container(width: 1, height: 30, color: Colors.blue.shade100),
-            _statItem('phút nữa tới', _timeText?.replaceAll(' phút', '') ?? '...'),
+            _statItem('phút nữa tới', timeDisplay),
           ]),
         ),
 
@@ -251,12 +334,12 @@ class _ActiveTaskCardState extends State<_ActiveTaskCard> {
         _step(1, 'Đã nhận yêu cầu', time: req.acceptedAt, done: true),
         _step(2, 'Đang di chuyển', time: req.movingAt, done: req.movingAt != null, active: isProcessing, sub: 'đang chia sẻ vị trí cho chủ xe'),
         _step(3, 'Đã tới hiện trường', time: req.arrivedAt, done: req.arrivedAt != null, active: isArrived),
-        _step(4, 'Hoàn tất', last: true),
+        _step(4, 'Hoàn tất', time: req.doneAt, done: req.status == 'done', last: true),
 
         const SizedBox(height: 32),
         
         Row(children: [
-          Expanded(child: AppButton('Gọi chủ xe', icon: Icons.phone, tone: Tone.ghost, onTap: () => callPhone(context, req.requesterPhone ?? ''))),
+          Expanded(child: AppButton('Gọi', icon: Icons.phone, tone: Tone.ghost, onTap: () => callPhone(context, req.requesterPhone ?? ''))),
           const SizedBox(width: 12),
           if (!isArrived) 
             Expanded(flex: 2, child: AppButton(isProcessing ? 'Đã tới nơi' : 'Bắt đầu di chuyển', 

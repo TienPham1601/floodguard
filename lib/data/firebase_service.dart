@@ -1,5 +1,5 @@
 import 'dart:async';
-import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:rxdart/rxdart.dart';
@@ -394,6 +394,18 @@ class FirebaseService {
     });
   }
 
+  static Stream<List<SOSRequest>> streamProcessingSOS() {
+    final user = auth.currentUser;
+    if (user == null) return Stream.value([]);
+    return db.collection('sos_requests')
+        .where('rescuerId', isEqualTo: user.uid)
+        .snapshots()
+        .map((snap) {
+      final docs = snap.docs.map((d) => SOSRequest.fromFirestore(d)).toList();
+      return docs.where((r) => ['accepted', 'processing', 'arrived'].contains(r.status)).toList();
+    });
+  }
+
   static Future<void> createSOS({required String vehicleId, required String plate, required String model, required double lat, required double lng, required int waterCm}) async {
     final u = auth.currentUser;
     if (u == null) return;
@@ -428,6 +440,7 @@ class FirebaseService {
       'garageName': prof?['garageName'] ?? 'Gara', 'price': price, 'note': note, 'quotedAt': FieldValue.serverTimestamp(),
       'ratingAvg': (prof?['ratingAvg'] as num?)?.toDouble() ?? 0.0, 'ratingCount': prof?['ratingCount'] ?? 0,
     };
+    debugPrint('FIREBASE_QUOTE: Sending to sos_requests/$sosId/quotes/${user.uid} with data: $quoteData');
     final batch = db.batch();
     batch.set(db.collection('sos_requests').doc(sosId).collection('quotes').doc(user.uid), quoteData);
     batch.update(db.collection('sos_requests').doc(sosId), {
@@ -460,6 +473,7 @@ class FirebaseService {
     final prof = await getUserProfile();
     final String rName = prof?['name'] ?? 'Thợ cứu hộ';
     final String rPhone = prof?['phone'] ?? '';
+    debugPrint('FIREBASE_ACCEPT: id=$id rid=$rid gname=$gname');
     return db.runTransaction((transaction) async {
       final docRef = db.collection('sos_requests').doc(id);
       final snapshot = await transaction.get(docRef);

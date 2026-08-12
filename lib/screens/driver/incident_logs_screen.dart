@@ -17,11 +17,16 @@ class IncidentLogsScreen extends StatefulWidget {
 
 class _IncidentLogsScreenState extends State<IncidentLogsScreen> {
   VehicleData? _vehicle;
+  late Stream<QuerySnapshot> _logStream;
 
   @override
   void initState() {
     super.initState();
     _loadVehicle();
+    final uid = FirebaseService.auth.currentUser?.uid;
+    _logStream = FirebaseService.db.collection('incident_logs')
+        .where('ownerId', isEqualTo: uid)
+        .snapshots();
   }
 
   Future<void> _loadVehicle() async {
@@ -106,19 +111,32 @@ class _IncidentLogsScreenState extends State<IncidentLogsScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final uid = FirebaseService.auth.currentUser?.uid;
     return Scaffold(
       backgroundColor: C.bg(context),
       appBar: topBar(context, 'Nhật ký hoạt động', left: IconButton(icon: const Icon(Icons.arrow_back), onPressed: () => Navigator.pop(context))),
       body: StreamBuilder<QuerySnapshot>(
-        stream: FirebaseService.db.collection('incident_logs')
-            .where('ownerId', isEqualTo: FirebaseService.auth.currentUser!.uid)
-            .orderBy('timestamp', descending: true)
-            .snapshots(),
+        stream: _logStream,
         builder: (context, snapshot) {
-          if (snapshot.hasError) return Center(child: Text('Lỗi: ${snapshot.error}'));
+          if (snapshot.hasError) {
+            debugPrint('LOG_SCREEN ERROR: ${snapshot.error}');
+            return Center(child: Padding(
+              padding: const EdgeInsets.all(32),
+              child: Text('Không thể tải nhật ký. Vui lòng kiểm tra kết nối mạng hoặc thử lại sau.', textAlign: TextAlign.center, style: T.body(context, Colors.red)),
+            ));
+          }
           if (snapshot.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator());
 
-          final logs = snapshot.data?.docs ?? [];
+          // SẮP XẾP PHÍA CLIENT ĐỂ TRÁNH LỖI INDEX FIRESTORE
+          final List<QueryDocumentSnapshot> logs = (snapshot.data?.docs ?? []).toList();
+          logs.sort((a, b) {
+            final t1 = (a.data() as Map<String, dynamic>)['timestamp'] as Timestamp?;
+            final t2 = (b.data() as Map<String, dynamic>)['timestamp'] as Timestamp?;
+            if (t1 == null || t2 == null) return 0;
+            return t2.compareTo(t1); // Giảm dần
+          });
+          
+          debugPrint('LOG_SCREEN: uid=$uid docs=${logs.length}');
 
           return Column(
             children: [

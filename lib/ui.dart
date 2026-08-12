@@ -49,10 +49,11 @@ class AppButton extends StatelessWidget {
   final VoidCallback? onTap;
   final Tone tone;
   final bool full;
+  final bool enabled;
   final double height;
   final EdgeInsets? padding;
   const AppButton(this.label,
-      {super.key, this.icon, this.onTap, this.tone = Tone.brand, this.full = true, this.height = 52, this.padding});
+      {super.key, this.icon, this.onTap, this.tone = Tone.brand, this.full = true, this.enabled = true, this.height = 52, this.padding});
 
   @override
   Widget build(BuildContext context) {
@@ -75,6 +76,11 @@ class AppButton extends StatelessWidget {
         fg = C.brand(context);
         break;
     }
+    if (!enabled) {
+      bg = Colors.grey.shade300;
+      fg = Colors.grey.shade500;
+    }
+
     return SizedBox(
       width: full ? double.infinity : null,
       height: height,
@@ -83,10 +89,10 @@ class AppButton extends StatelessWidget {
         borderRadius: BorderRadius.circular(12),
         child: InkWell(
           borderRadius: BorderRadius.circular(12),
-          onTap: onTap,
+          onTap: enabled ? onTap : null,
           child: Container(
             alignment: Alignment.center,
-            decoration: tone == Tone.ghost
+            decoration: (tone == Tone.ghost && enabled)
                 ? BoxDecoration(
                     border: Border.all(color: C.line(context)),
                     borderRadius: BorderRadius.circular(12))
@@ -185,10 +191,34 @@ class StatusTag extends StatelessWidget {
 // ---------- Khối trạng thái lớn (phương án C) ----------
 class HeroStatus extends StatelessWidget {
   final double cm, warnAt, dangerAt;
-  const HeroStatus({super.key, required this.cm, this.warnAt = 20, this.dangerAt = 35});
+  final bool isWet;
+  const HeroStatus({super.key, required this.cm, this.warnAt = 20, this.dangerAt = 35, this.isWet = true});
 
   @override
   Widget build(BuildContext context) {
+    if (!isWet) {
+      return Container(
+        padding: const EdgeInsets.all(S.x5),
+        decoration: BoxDecoration(
+          color: Colors.grey.shade50, 
+          borderRadius: BorderRadius.circular(20), 
+          border: Border.all(color: Colors.grey.shade200)
+        ),
+        child: Column(children: [
+          Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+            Text('CHẾ ĐỘ CHỜ', style: T.label(context, Colors.grey).copyWith(letterSpacing: 1.2)),
+            const Icon(Icons.watch_later_outlined, color: Colors.grey, size: 22),
+          ]),
+          const SizedBox(height: 24),
+          const Icon(Icons.waves, size: 48, color: Colors.blueGrey),
+          const SizedBox(height: 16),
+          Text('Không phát hiện nước', style: T.title(context).copyWith(color: Colors.blueGrey)),
+          const SizedBox(height: 4),
+          Text('Hệ thống đang giám sát và sẽ đo khi có nước', style: T.caption(context)),
+        ]),
+      );
+    }
+
     final lv = levelOf(cm, warnAt, dangerAt);
     final color = C.of(context, lv);
     final bg = C.bgOf(context, lv);

@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:google_fonts/google_fonts.dart';
+import 'package:intl/intl.dart';
 import '../../theme.dart';
 import '../../ui.dart';
 import 'history_screen.dart';
@@ -103,6 +105,8 @@ class _UnitProfileScreenState extends State<UnitProfileScreen> {
               ]),
             ),
             const SizedBox(height: S.x4),
+            _ratingSummary(context, data),
+            const SizedBox(height: S.x4),
             RowItem(
               icon: Icons.history,
               iconColor: C.brand(context),
@@ -111,11 +115,90 @@ class _UnitProfileScreenState extends State<UnitProfileScreen> {
               sub: 'Xem các đơn đã hoàn thành',
               onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const RescueHistoryScreen())),
             ),
+            const SizedBox(height: S.x4),
+            _ratingList(context, FirebaseService.auth.currentUser!.uid),
             const SizedBox(height: 40),
             AppButton('Đăng xuất', icon: Icons.logout, tone: Tone.ghost, onTap: _logout),
           ],
         );
       }
+    );
+  }
+
+  Widget _ratingSummary(BuildContext context, Map<String, dynamic> data) {
+    final double avg = (data['ratingAvg'] as num?)?.toDouble() ?? 0.0;
+    final int count = data['ratingCount'] ?? 0;
+
+    return AppCard(
+      padding: const EdgeInsets.all(20),
+      child: Column(children: [
+        Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+          Text(avg.toStringAsFixed(1), style: GoogleFonts.jetBrainsMono(fontSize: 48, fontWeight: FontWeight.w900, color: C.ink(context))),
+          const SizedBox(width: 16),
+          Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Row(children: List.generate(5, (i) => Icon(
+              i < avg.floor() ? Icons.star_rounded : (i < avg ? Icons.star_half_rounded : Icons.star_outline_rounded),
+              color: Colors.orange, size: 20,
+            ))),
+            const SizedBox(height: 4),
+            Text('$count lượt đánh giá', style: T.caption(context).copyWith(fontWeight: FontWeight.bold)),
+          ]),
+        ]),
+      ]),
+    );
+  }
+
+  Widget _ratingList(BuildContext context, String rescuerId) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(left: 8, bottom: 12),
+          child: Text('ĐÁNH GIÁ GẦN ĐÂY', style: T.caption(context).copyWith(fontWeight: FontWeight.bold, letterSpacing: 1)),
+        ),
+        StreamBuilder<QuerySnapshot>(
+          stream: FirebaseService.db.collection('ratings')
+              .where('rescuerId', isEqualTo: rescuerId)
+              .orderBy('createdAt', descending: true)
+              .limit(10)
+              .snapshots(),
+          builder: (context, snapshot) {
+            if (!snapshot.hasData) return const SizedBox();
+            final docs = snapshot.data!.docs;
+            if (docs.isEmpty) return Center(child: Padding(padding: const EdgeInsets.all(20), child: Text('Chưa có đánh giá nào.', style: T.caption(context))));
+
+            return Column(children: docs.map((d) => _ratingItem(context, d.data() as Map<String, dynamic>)).toList());
+          }
+        ),
+      ],
+    );
+  }
+
+  Widget _ratingItem(BuildContext context, Map<String, dynamic> r) {
+    final DateTime date = (r['createdAt'] as Timestamp?)?.toDate() ?? DateTime.now();
+    final double stars = (r['stars'] as num?)?.toDouble() ?? 0.0;
+    final List<String> tags = List<String>.from(r['tags'] ?? []);
+
+    return AppCard(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(16),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+          Row(children: List.generate(5, (i) => Icon(Icons.star_rounded, size: 14, color: i < stars ? Colors.orange : Colors.grey.shade200))),
+          Text(DateFormat('dd/MM/yyyy').format(date), style: T.caption(context).copyWith(fontSize: 10)),
+        ]),
+        if (r['comment'] != null && r['comment'].toString().isNotEmpty) 
+          Padding(padding: const EdgeInsets.only(top: 8), child: Text(r['comment'], style: T.small(context))),
+        if (tags.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: Wrap(spacing: 4, children: tags.map((t) => Container(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+              decoration: BoxDecoration(color: Colors.grey.shade100, borderRadius: BorderRadius.circular(4)),
+              child: Text(t, style: const TextStyle(fontSize: 9, color: Colors.grey, fontWeight: FontWeight.bold)),
+            )).toList()),
+          ),
+      ]),
     );
   }
 }

@@ -607,14 +607,24 @@ class _RatingScreen extends StatefulWidget {
 }
 
 class _RatingScreenState extends State<_RatingScreen> {
-  double _stars = 5;
+  double _stars = 0;
   final _commentCtrl = TextEditingController();
   final List<String> _selectedTags = [];
   bool _loading = false;
 
-  final _allTags = ['Đúng giờ', 'Chuyên nghiệp', 'Giá hợp lý', 'Thân thiện', 'Nhiệt tình'];
+  final _allTags = ['Đúng giờ', 'Chuyên nghiệp', 'Giá hợp lý', 'Thân thiện', 'Nhiệt tình', 'Xử lý nhanh'];
+
+  String _getStarText() {
+    if (_stars == 0) return 'Vui lòng chọn số sao';
+    if (_stars <= 1) return 'Rất tệ';
+    if (_stars <= 2) return 'Tệ';
+    if (_stars <= 3) return 'Bình thường';
+    if (_stars <= 4) return 'Tốt';
+    return 'Tuyệt vời';
+  }
 
   void _submit() async {
+    if (_stars == 0) return;
     setState(() => _loading = true);
     try {
       await FirebaseService.submitRating(
@@ -624,8 +634,9 @@ class _RatingScreenState extends State<_RatingScreen> {
         comment: _commentCtrl.text.trim(),
         tags: _selectedTags,
       );
-      // Đổi status sang rated để không hiện lại màn này
-      await FirebaseService.db.collection('sos_requests').doc(widget.req.id).update({'status': 'rated'});
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Cảm ơn bạn đã đánh giá!')));
+      }
     } catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Lỗi: $e')));
     } finally {
@@ -633,90 +644,146 @@ class _RatingScreenState extends State<_RatingScreen> {
     }
   }
 
+  void _skip() async {
+    try {
+      await FirebaseService.db.collection('sos_requests').doc(widget.req.id).update({'rated': true, 'status': 'rated'});
+    } catch (e) {
+       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Lỗi: $e')));
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final currencyFormat = NumberFormat.currency(locale: 'vi_VN', symbol: 'đ');
+    final completedTime = widget.req.doneAt ?? DateTime.now();
     
     return Scaffold(
-      backgroundColor: C.bg(context),
-      body: Center(
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 400),
-          child: ListView(
-            padding: const EdgeInsets.all(28),
-            shrinkWrap: true,
-            children: [
-              const Center(child: Icon(Icons.check_circle, size: 80, color: Colors.green)),
-              const SizedBox(height: 24),
-              Text('Cứu hộ thành công!', style: T.h2(context), textAlign: TextAlign.center),
-              const SizedBox(height: 12),
-              AppCard(
-                color: Colors.grey.shade50,
-                child: Column(children: [
-                  Text(widget.req.garageName ?? 'Đơn vị cứu hộ', style: const TextStyle(fontWeight: FontWeight.bold)),
+      backgroundColor: Colors.white,
+      body: SafeArea(
+        child: ListView(
+          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 32),
+          children: [
+            // Header
+            Center(
+              child: Column(
+                children: [
+                  const Icon(Icons.check_circle, size: 72, color: Colors.green).animate().scale(duration: 600.ms, curve: Curves.easeOutBack),
+                  const SizedBox(height: 16),
+                  Text('Cứu hộ hoàn tất!', style: T.h2(context).copyWith(fontSize: 24)),
                   const SizedBox(height: 4),
-                  Text('Thợ: ${widget.req.rescuerName ?? "Kỹ thuật viên"}', style: T.caption(context)),
-                  const Divider(height: 24),
-                  Text('Giá đã thanh toán: ${currencyFormat.format(widget.req.quotedPrice ?? 0)}', 
-                      style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.blue)),
+                  Text('Hoàn thành lúc ${DateFormat('HH:mm, dd/MM').format(completedTime)}', style: T.caption(context)),
+                ],
+              ),
+            ),
+            const SizedBox(height: 32),
+
+            // Thông tin dịch vụ
+            AppCard(
+              padding: const EdgeInsets.all(16),
+              color: Colors.grey.shade50,
+              child: Column(children: [
+                Row(children: [
+                  CircleAvatar(radius: 20, backgroundColor: C.brand(context).withValues(alpha: 0.1), child: Icon(Icons.garage, color: C.brand(context), size: 20)),
+                  const SizedBox(width: 12),
+                  Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Text(widget.req.garageName ?? 'Đơn vị cứu hộ', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+                    Text('Thợ: ${widget.req.rescuerName ?? "Kỹ thuật viên"}', style: T.caption(context)),
+                  ])),
                 ]),
-              ),
-              const SizedBox(height: 32),
-              Text('Bạn đánh giá thế nào về dịch vụ?', textAlign: TextAlign.center, style: T.body(context)),
-              const SizedBox(height: 16),
+                const Divider(height: 24),
+                Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                  Text('Xe: ${widget.req.vehiclePlate}', style: T.small(context)),
+                  Text(currencyFormat.format(widget.req.quotedPrice ?? 0), style: const TextStyle(fontWeight: FontWeight.w900, color: Colors.blue, fontSize: 16)),
+                ]),
+              ]),
+            ),
+            const SizedBox(height: 40),
 
-              Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: List.generate(5, (index) => IconButton(
-                  icon: Icon(index < _stars ? Icons.star : Icons.star_border, size: 44, color: Colors.orange),
-                  onPressed: () => setState(() => _stars = index + 1.0),
-                ).animate(target: index < _stars ? 1 : 0).scale(begin: const Offset(1,1), end: const Offset(1.2, 1.2))),
-              ),
-              const SizedBox(height: 32),
+            // Đánh giá sao
+            Center(child: Text('Bạn thấy thế nào về dịch vụ?', style: T.title(context))),
+            const SizedBox(height: 16),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: List.generate(5, (index) {
+                final starValue = index + 1.0;
+                final isSelected = starValue <= _stars;
+                return GestureDetector(
+                  onTap: () => setState(() => _stars = starValue),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 4),
+                    child: Icon(
+                      isSelected ? Icons.star_rounded : Icons.star_outline_rounded,
+                      size: 52,
+                      color: isSelected ? Colors.orange : Colors.grey.shade300,
+                    ).animate(target: isSelected ? 1 : 0).scale(duration: 200.ms, curve: Curves.easeOutBack),
+                  ),
+                );
+              }),
+            ),
+            const SizedBox(height: 12),
+            Center(child: Text(_getStarText(), style: TextStyle(color: _stars > 0 ? Colors.orange : Colors.grey, fontWeight: FontWeight.bold))),
+            const SizedBox(height: 40),
 
-              Wrap(
-                alignment: WrapAlignment.center,
-                spacing: 8,
-                runSpacing: 8,
-                children: _allTags.map((tag) {
-                  final isSelected = _selectedTags.contains(tag);
-                  return ChoiceChip(
-                    label: Text(tag),
-                    selected: isSelected,
-                    onSelected: (val) {
-                      setState(() {
-                        if (val) _selectedTags.add(tag);
-                        else _selectedTags.remove(tag);
-                      });
-                    },
-                    selectedColor: C.brandBg(context),
-                    labelStyle: TextStyle(color: isSelected ? C.brand(context) : Colors.grey),
-                  );
-                }).toList(),
-              ),
-              const SizedBox(height: 32),
+            // Nhãn nhanh
+            if (_stars > 0) ...[
+               Text('Điều gì làm bạn hài lòng?', style: T.caption(context).copyWith(fontWeight: FontWeight.bold)),
+               const SizedBox(height: 12),
+               Wrap(
+                 spacing: 8,
+                 runSpacing: 8,
+                 children: _allTags.map((tag) {
+                   final isSelected = _selectedTags.contains(tag);
+                   return FilterChip(
+                     label: Text(tag, style: TextStyle(fontSize: 13, color: isSelected ? Colors.white : Colors.grey.shade700)),
+                     selected: isSelected,
+                     onSelected: (val) {
+                       setState(() {
+                         if (val) _selectedTags.add(tag);
+                         else _selectedTags.remove(tag);
+                       });
+                     },
+                     selectedColor: C.brand(context),
+                     checkmarkColor: Colors.white,
+                     backgroundColor: Colors.grey.shade100,
+                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20), side: BorderSide.none),
+                   );
+                 }).toList(),
+               ),
+               const SizedBox(height: 24),
+            ],
 
-              TextField(
-                controller: _commentCtrl,
-                maxLines: 3,
-                decoration: InputDecoration(
-                  hintText: 'Nhận xét thêm của bạn...',
-                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(16)),
-                  filled: true,
-                  fillColor: Colors.white,
+            // Bình luận
+            TextField(
+              controller: _commentCtrl,
+              maxLines: 3,
+              decoration: InputDecoration(
+                hintText: 'Chia sẻ trải nghiệm của bạn...',
+                hintStyle: T.small(context, Colors.grey),
+                filled: true,
+                fillColor: Colors.grey.shade50,
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: BorderSide.none),
+                contentPadding: const EdgeInsets.all(16),
+              ),
+            ),
+            const SizedBox(height: 48),
+
+            // Nút bấm
+            if (_loading) 
+              const Center(child: CircularProgressIndicator())
+            else ...[
+              AppButton(
+                'GỬI ĐÁNH GIÁ', 
+                onTap: _stars > 0 ? _submit : null,
+              ),
+              const SizedBox(height: 12),
+              Center(
+                child: TextButton(
+                  onPressed: _skip, 
+                  child: Text('Bỏ qua', style: TextStyle(color: Colors.grey.shade400))
                 ),
               ),
-              const SizedBox(height: 48),
-
-              if (_loading) const Center(child: CircularProgressIndicator())
-              else Column(children: [
-                AppButton('GỬI ĐÁNH GIÁ', onTap: _submit),
-                const SizedBox(height: 16),
-                TextButton(onPressed: () => FirebaseService.db.collection('sos_requests').doc(widget.req.id).update({'status': 'rated'}), 
-                    child: Text('Bỏ qua', style: TextStyle(color: Colors.grey.shade400))),
-              ]),
             ],
-          ),
+          ],
         ),
       ),
     );

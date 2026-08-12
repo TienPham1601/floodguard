@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import 'package:latlong2/latlong.dart';
@@ -7,6 +8,7 @@ import '../../ui.dart';
 import '../../data/vehicle_state.dart';
 import '../../data/app_settings.dart';
 import '../../data/firebase_service.dart';
+import '../../data/device_service.dart';
 import '../../data/places.dart';
 import '../../data/location_service.dart';
 import 'add_vehicle_screen.dart';
@@ -23,17 +25,89 @@ class CarScreen extends StatefulWidget {
 class _CarScreenState extends State<CarScreen> {
   static const defaultLocation = LatLng(21.0285, 105.8542);
   LatLng? _currentGPS;
+  StreamSubscription? _eventSub;
 
   @override
   void initState() {
     super.initState();
     _initGPS();
+    _listenToDeviceEvents();
+  }
+
+  void _listenToDeviceEvents() {
+    _eventSub = deviceService.eventStream.listen((event) {
+      if (!mounted) return;
+      
+      final String type = event['type'];
+      final String msg = event['message'];
+
+      ScaffoldMessenger.of(context).hideCurrentSnackBar();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(msg, style: const TextStyle(fontWeight: FontWeight.bold)),
+              if (type == 'warning') const Text('Vui lòng kiểm tra xe ngay lập tức.'),
+            ],
+          ),
+          backgroundColor: type == 'danger' ? Colors.red : Colors.orange,
+          duration: const Duration(seconds: 10),
+          action: type == 'warning' 
+            ? SnackBarAction(
+                label: 'ĐÓNG CỔ HÚT', 
+                textColor: Colors.white,
+                onPressed: () => deviceService.sendCommand("INTAKE_CLOSE")
+              )
+            : null,
+        )
+      );
+    });
+  }
+
+  @override
+  void dispose() {
+    _eventSub?.cancel();
+    super.dispose();
   }
 
   Future<void> _initGPS() async {
     final pos = await LocationService.getCurrentLocation();
     if (mounted) {
       setState(() => _currentGPS = pos);
+    }
+  }
+
+  void _toggleIntake() {
+    if (vehicle.intakeClosed) {
+      deviceService.sendCommand("INTAKE_OPEN");
+    } else {
+      deviceService.sendCommand("INTAKE_CLOSE");
+    }
+  }
+
+  void _togglePower() async {
+    if (!vehicle.powerCut) {
+      final ok = await showDialog<bool>(
+        context: context,
+        builder: (c) => AlertDialog(
+          title: const Text('Ngắt nguồn điện ô tô?'),
+          content: const Text('Xe sẽ không khởi động được cho tới khi bạn khôi phục nguồn. Chỉ dùng khi thực sự cần thiết.'),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('Hủy')),
+            TextButton(
+              onPressed: () => Navigator.pop(c, true), 
+              child: const Text('Ngắt nguồn', style: TextStyle(color: Colors.red, fontWeight: FontWeight.bold))
+            ),
+          ],
+        )
+      );
+      if (ok == true) {
+        deviceService.sendCommand("POWER_CUT");
+      }
+    } else {
+      deviceService.sendCommand("POWER_ON");
     }
   }
 
@@ -71,6 +145,57 @@ class _CarScreenState extends State<CarScreen> {
               ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+
+  void _showDeviceOptions(BuildContext context) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: C.surface(context),
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(height: 20),
+            Text(vehicle.connectedDeviceName ?? 'Thiết bị FloodGuard', style: T.title(ctx)),
+            const SizedBox(height: 8),
+            const Divider(),
+            ListTile(
+              onTap: () {
+                Navigator.pop(ctx);
+                deviceService.disconnect();
+              },
+              leading: const Icon(Icons.bluetooth_disabled, color: Colors.orange),
+              title: const Text('Ngắt kết nối tạm thời'),
+              subtitle: const Text('Có thể tự động kết nối lại sau'),
+            ),
+            ListTile(
+              onTap: () async {
+                Navigator.pop(ctx);
+                final ok = await showDialog<bool>(
+                  context: context,
+                  builder: (c) => AlertDialog(
+                    title: const Text('Quên thiết bị?'),
+                    content: const Text('Xoá lịch sử ghép nối. Bạn sẽ cần quét lại để kết nối thiết bị này.'),
+                    actions: [
+                      TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('Hủy')),
+                      TextButton(onPressed: () => Navigator.pop(c, true), child: const Text('Quên ngay', style: TextStyle(color: Colors.red))),
+                    ],
+                  )
+                );
+                if (ok == true) {
+                  deviceService.forgetDevice();
+                }
+              },
+              leading: const Icon(Icons.delete_outline, color: Colors.red),
+              title: const Text('Quên thiết bị này', style: TextStyle(color: Colors.red)),
+              subtitle: const Text('Xoá dữ liệu ghép nối khỏi tài khoản'),
+            ),
+            const SizedBox(height: 20),
+          ],
         ),
       ),
     );
@@ -115,14 +240,18 @@ class _CarScreenState extends State<CarScreen> {
               );
             }
 
-            // Cập nhật VehicleState (Single Source of Truth) cho simulation và alerts
+            // Cập nhật VehicleState (Single Source of Truth)
             vehicle.id = vehicleData.id;
             vehicle.plate = vehicleData.plate;
             vehicle.model = vehicleData.model;
-            vehicle.waterCm = vehicleData.waterCm.toDouble();
-            vehicle.tempC = vehicleData.tempC.toDouble();
-            vehicle.warnAt = vehicleData.warnAt.toDouble();
-            vehicle.dangerAt = vehicleData.dangerAt.toDouble();
+            
+            // Chỉ đồng bộ dữ liệu cảm biến từ DB nếu KHÔNG có kết nối thật
+            if (!vehicle.isFullyValidated && !simulationMode.value) {
+              vehicle.waterCm = vehicleData.waterCm.toDouble();
+              vehicle.tempC = vehicleData.tempC.toDouble();
+              vehicle.warnAt = vehicleData.warnAt.toDouble();
+              vehicle.dangerAt = vehicleData.dangerAt.toDouble();
+            }
 
             final lv = levelOf(vehicle.waterCm.toDouble(), vehicle.warnAt.toDouble(), vehicle.dangerAt.toDouble());
             final danger = lv == Level.danger;
@@ -133,6 +262,20 @@ class _CarScreenState extends State<CarScreen> {
             return ListView(
               padding: const EdgeInsets.all(S.x4),
               children: [
+                // Simulation Mode Banner
+                ValueListenableBuilder<bool>(
+                  valueListenable: simulationMode,
+                  builder: (context, isSim, _) => isSim 
+                    ? Container(
+                        margin: const EdgeInsets.only(bottom: 16),
+                        padding: const EdgeInsets.symmetric(vertical: 8),
+                        decoration: BoxDecoration(color: Colors.orange.shade800, borderRadius: BorderRadius.circular(8)),
+                        alignment: Alignment.center,
+                        child: const Text('CHẾ ĐỘ MÔ PHỎNG - DỮ LIỆU GIẢ', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12)),
+                      )
+                    : const SizedBox.shrink(),
+                ),
+
                 // chọn xe
                 Material(
                   color: C.surface(context),
@@ -163,30 +306,74 @@ class _CarScreenState extends State<CarScreen> {
                 // Card Thiết bị FloodGuard
                 ListenableBuilder(
                   listenable: vehicle,
-                  builder: (context, _) => AppCard(
-                    padding: const EdgeInsets.all(12),
-                    child: Row(children: [
-                      Container(
-                        width: 44, height: 44,
-                        decoration: BoxDecoration(color: vehicle.isConnected ? C.brandBg(context) : Colors.grey.shade100, borderRadius: BorderRadius.circular(10)),
-                        child: Icon(Icons.router, color: vehicle.isConnected ? C.brand(context) : Colors.grey),
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                        Text(vehicle.isConnected ? 'FloodGuard-A3F2' : 'Thiết bị FloodGuard', style: T.body(context).copyWith(fontWeight: FontWeight.bold, fontSize: 14)),
-                        Text(vehicle.isConnected ? 'Đã kết nối · pin ${vehicle.batteryLevel}% · ${vehicle.deviceVersion}' : 'Chưa kết nối thiết bị', style: T.caption(context).copyWith(color: vehicle.isConnected ? Colors.green.shade700 : Colors.red.shade700, fontWeight: FontWeight.bold)),
-                      ])),
-                      if (!vehicle.isConnected)
-                        AppButton('Kết nối', full: false, height: 32, padding: const EdgeInsets.symmetric(horizontal: 12), onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const PairDeviceScreen())))
-                      else
-                        const Icon(Icons.bluetooth_connected, size: 16, color: Colors.green),
-                    ]),
-                  ),
+                  builder: (context, _) {
+                    String title = 'Thiết bị FloodGuard';
+                    String sub = 'Chưa kết nối thiết bị';
+                    Color subColor = Colors.red.shade700;
+                    Widget? action;
+
+                    if (vehicle.isConnecting) {
+                      title = vehicle.connectedDeviceName ?? 'FloodGuard';
+                      sub = 'Đang kết nối...';
+                      subColor = Colors.orange.shade700;
+                      action = const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2));
+                    } else if (vehicle.isConnected) {
+                      title = vehicle.connectedDeviceName ?? 'FloodGuard';
+                      sub = 'Đang hoạt động realtime';
+                      subColor = Colors.green.shade700;
+                      action = IconButton(
+                        icon: const Icon(Icons.more_vert, size: 20),
+                        onPressed: () => _showDeviceOptions(context),
+                      );
+                    } else if (vehicle.reconnectFailed) {
+                       title = vehicle.connectedDeviceName ?? 'FloodGuard';
+                       sub = 'Không tìm thấy thiết bị';
+                       subColor = Colors.red.shade700;
+                       action = Row(mainAxisSize: MainAxisSize.min, children: [
+                          IconButton(icon: const Icon(Icons.refresh, size: 18), onPressed: () => deviceService.initAutoConnect()),
+                          IconButton(icon: const Icon(Icons.bluetooth_searching, size: 18), onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const PairDeviceScreen()))),
+                       ]);
+                    } else {
+                      action = AppButton('Kết nối', full: false, height: 32, padding: const EdgeInsets.symmetric(horizontal: 12), 
+                          onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const PairDeviceScreen())));
+                    }
+
+                    return AppCard(
+                      padding: const EdgeInsets.all(12),
+                      child: Row(children: [
+                        Container(
+                          width: 44, height: 44,
+                          decoration: BoxDecoration(
+                            color: vehicle.isConnected ? Colors.green.shade50 : (vehicle.isConnecting ? Colors.orange.shade50 : Colors.grey.shade100), 
+                            borderRadius: BorderRadius.circular(10)
+                          ),
+                          child: Icon(
+                            vehicle.isConnected ? Icons.bluetooth_connected : (vehicle.isConnecting ? Icons.bluetooth_searching : Icons.bluetooth_disabled), 
+                            color: vehicle.isConnected ? Colors.green : (vehicle.isConnecting ? Colors.orange : Colors.grey)
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                          Text(title, style: T.body(context).copyWith(fontWeight: FontWeight.bold, fontSize: 14)),
+                          Text(sub, style: T.caption(context).copyWith(color: subColor, fontWeight: FontWeight.bold)),
+                        ])),
+                        action,
+                      ]),
+                    );
+                  },
                 ).animate().fade().slideY(begin: 0.2),
 
                 const SizedBox(height: S.x4),
 
-                HeroStatus(cm: vehicle.waterCm, warnAt: vehicle.warnAt, dangerAt: vehicle.dangerAt).animate().scale(delay: const Duration(milliseconds: 100)),
+                ListenableBuilder(
+                  listenable: vehicle,
+                  builder: (context, _) => HeroStatus(
+                    cm: vehicle.waterCm, 
+                    warnAt: vehicle.warnAt, 
+                    dangerAt: vehicle.dangerAt,
+                    isWet: vehicle.isWet,
+                  ),
+                ).animate().scale(delay: const Duration(milliseconds: 100)),
                 const SizedBox(height: S.x4),
                 
                 // Vị trí xe (Reverse Geocoding) - ĐỒNG BỘ VỚI SOS
@@ -242,9 +429,6 @@ class _CarScreenState extends State<CarScreen> {
                       _kv(context, 'Nguồn điện', vehicle.powerCut ? 'ĐÃ NGẮT' : 'BÌNH THƯỜNG',
                           vehicle.powerCut ? C.danger(context) : C.safe(context),
                           vehicle.powerCut ? C.dangerBg(context) : C.safeBg(context)),
-                      _kv(context, 'Người trong xe', vehicle.personInside ? 'CÓ' : 'KHÔNG',
-                          vehicle.personInside ? C.danger(context) : C.safe(context),
-                          vehicle.personInside ? C.dangerBg(context) : C.safeBg(context)),
                     ]),
                   ),
                   const SizedBox(height: S.x4),
@@ -253,32 +437,46 @@ class _CarScreenState extends State<CarScreen> {
                         builder: (_) => FullAlertScreen.flood(cm: vehicle.waterCm.toInt())));
                   }),
                   const SizedBox(height: S.x2),
-                  AppButton('Mở lại cổ hút', tone: Tone.ghost, onTap: vehicle.toggleIntake),
+                  AppButton('Mở lại cổ hút', tone: Tone.ghost, onTap: _toggleIntake),
                 ] else ...[
                   RowItem(
                     icon: Icons.airline_seat_recline_normal,
                     iconColor: C.safe(context),
                     iconBg: C.safeBg(context),
                     title: 'Cabin',
-                    sub: '${vehicle.tempC.toStringAsFixed(0)}°C · độ ẩm ${vehicle.humidity.toStringAsFixed(0)}% · ${vehicle.personInside ? "có người" : "không có người"}',
+                    sub: '${vehicle.tempC.toStringAsFixed(0)}°C · độ ẩm ${vehicle.humidity.toStringAsFixed(0)}%',
                     onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const CabinScreen())),
                   ),
                   const SizedBox(height: S.x4),
-                  Row(children: [
-                    Expanded(
-                      child: AppButton(
-                        vehicle.intakeClosed ? 'Mở cổ hút' : (warn ? 'Đóng cổ hút' : 'Cổ hút'),
-                        icon: Icons.air,
-                        tone: warn ? Tone.soft : Tone.ghost,
-                        onTap: vehicle.toggleIntake,
+                  ListenableBuilder(
+                    listenable: vehicle,
+                    builder: (context, _) => Row(children: [
+                      Expanded(
+                        child: AppButton(
+                          vehicle.intakeClosed ? 'Mở cổ hút' : (warn ? 'Đóng cổ hút' : 'Cổ hút'),
+                          icon: Icons.air,
+                          tone: warn ? Tone.soft : Tone.ghost,
+                          enabled: vehicle.isConnected,
+                          onTap: _toggleIntake,
+                        ),
                       ),
+                      const SizedBox(width: S.x3),
+                      Expanded(
+                        child: AppButton(
+                          vehicle.powerCut ? 'Cấp nguồn' : 'Ngắt nguồn',
+                          icon: Icons.power_settings_new, 
+                          tone: vehicle.powerCut ? Tone.soft : Tone.ghost,
+                          enabled: vehicle.isConnected,
+                          onTap: _togglePower,
+                        ),
+                      ),
+                    ]),
+                  ),
+                  if (!vehicle.isConnected)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: Center(child: Text('Cần kết nối thiết bị để điều khiển', style: T.caption(context).copyWith(color: Colors.red))),
                     ),
-                    const SizedBox(width: S.x3),
-                    Expanded(
-                      child: AppButton(vehicle.powerCut ? 'Cấp nguồn' : 'Nguồn',
-                          icon: Icons.power_settings_new, tone: Tone.ghost, onTap: vehicle.togglePower),
-                    ),
-                  ]),
                 ],
 
                 const SizedBox(height: S.x6),

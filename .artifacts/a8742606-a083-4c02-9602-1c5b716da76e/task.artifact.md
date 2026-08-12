@@ -1,0 +1,10 @@
+- [ ] **Step 1: Manifest Permissions**
+    - [ ] Add `tools` namespace to `AndroidManifest.xml`.
+    - [ ] Declare Bluetooth and Location permissions in `AndroidManifest.xml`.
+- [ ] **Step 2: Build Configuration**
+    - [ ] Update `minSdk` to 21 in `app/build.gradle.kts`.
+- [ ] **Step 3: Runtime Permission Logic**
+    - [ ] Update `_startScan` in `pair_device_screen.dart` to handle Android versions.
+    - [ ] Add logs and "Open Settings" guidance.
+- [ ] **Step 4: Verification**
+    - [ ] Run `flutter analyze`.

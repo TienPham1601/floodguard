@@ -145,16 +145,17 @@ class _ListState extends State<_List> with AutomaticKeepAliveClientMixin {
         }
 
         if (snapshot.hasError) {
+          debugPrint('RESCUE_LIST ERROR: ${snapshot.error}');
           return Center(child: Padding(
-            padding: const EdgeInsets.all(24),
+            padding: const EdgeInsets.all(32),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Icon(Icons.error_outline, color: Colors.red, size: 40),
+                const Icon(Icons.cloud_off, color: Colors.grey, size: 48),
                 const SizedBox(height: 16),
-                Text('Lỗi tải dữ liệu: ${snapshot.error}', textAlign: TextAlign.center, style: const TextStyle(color: Colors.red)),
+                const Text('Không thể kết nối máy chủ cứu hộ. Vui lòng kiểm tra mạng.', textAlign: TextAlign.center, style: TextStyle(color: Colors.red)),
                 const SizedBox(height: 16),
-                AppButton('Thử lại', tone: Tone.soft, full: false, onTap: () {
+                AppButton('Tải lại', tone: Tone.soft, full: false, onTap: () {
                   setState(() { _hasInitialData = false; _isTimedOut = false; });
                   _startTimeout();
                 }),

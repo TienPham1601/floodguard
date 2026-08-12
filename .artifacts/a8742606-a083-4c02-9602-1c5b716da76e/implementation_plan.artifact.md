@@ -1,26 +1,47 @@
-# Implementation Plan - Fix Warnings and Errors in main.dart
+# Implementation Plan - Fix Bluetooth Permissions
 
-The goal is to resolve the warnings and errors in `lib/main.dart`. After investigation, most errors were due to missing dependencies, which have been resolved by running `flutter pub get`. The `firebase_options.dart` file was also found to be present, so the previous plan to remove it is cancelled.
+This plan addresses the "Bluetooth permission missing in manifest" error by correctly declaring permissions in `AndroidManifest.xml`, ensuring `minSdkVersion` is compatible, and refining the runtime permission request logic.
 
 ## User Review Required
 
-> [!NOTE]
-> All original Firebase configurations and project structures remain intact. The changes are purely for code quality and resolving linting warnings.
+> [!IMPORTANT]
+> - After applying these changes, you **must** uninstall the app from your device and run `flutter clean` followed by `flutter run`. This is necessary because permission changes in the manifest often do not take effect when simply hot-reloading or re-installing over an existing build.
 
 ## Proposed Changes
 
-### [Component: App Entry Point]
+### [Component: Android Configuration]
 
-#### [MODIFY] [main.dart](file:///run/media/tienpham/App/flutter_newcar/lib/main.dart)
-- Keep the `firebase_options.dart` import and its usage as they are correct.
-- Add `const` keywords where recommended for better performance.
-- Wrap `if` statements in curly braces `{}` to follow the project's linting rules (as seen in other files).
-- Clean up the code formatting to ensure the IDE's analyzer syncs correctly.
+#### [MODIFY] [AndroidManifest.xml](file:///run/media/tienpham/App/flutter_newcar/android/app/src/main/AndroidManifest.xml)
+- Add `xmlns:tools="http://schemas.android.com/tools"` to the `<manifest>` tag.
+- Add comprehensive Bluetooth and Location permissions:
+    - `BLUETOOTH_SCAN` (with `neverForLocation` flag for Android 12+).
+    - `BLUETOOTH_CONNECT` (Android 12+).
+    - `BLUETOOTH` and `BLUETOOTH_ADMIN` (maxSdkVersion 30).
+    - `ACCESS_FINE_LOCATION` and `ACCESS_COARSE_LOCATION`.
+- Add `android.hardware.bluetooth_le` feature.
+
+#### [MODIFY] [build.gradle.kts](file:///run/media/tienpham/App/flutter_newcar/android/app/build.gradle.kts)
+- Explicitly set `minSdk = 21` to ensure compatibility with `flutter_blue_plus`.
+
+### [Component: UI - Pairing]
+
+#### [MODIFY] [pair_device_screen.dart](file:///run/media/tienpham/App/flutter_newcar/lib/screens/driver/pair_device_screen.dart)
+- Update `_startScan` to handle version-specific permissions:
+    - Use `device_info_plus` (if available) or check `Platform` to determine Android version.
+    - Request `bluetoothScan` and `bluetoothConnect` on Android 12+ (API 31+).
+    - Request `location` on Android 11 and below.
+- Add logic to show a dialog or SnackBar with "Open Settings" instructions if permissions are permanently denied.
+- Add `debugPrint` logs for each permission status.
 
 ## Verification Plan
 
 ### Automated Tests
-- Run `flutter analyze lib/main.dart` to confirm zero issues.
+- Run `flutter analyze` to ensure no syntax errors.
 
 ### Manual Verification
-- The user can verify that the app still initializes Firebase correctly and the IDE no longer shows red markers.
+1. **Uninstall App:** Remove FloodGuard from the test device.
+2. **Clean & Build:** Run `flutter clean` and `flutter run`.
+3. **Permissions Flow:**
+    - On Android 12+, verify that the app asks for "Nearby devices" (Scan/Connect).
+    - On Android 11-, verify that the app asks for "Location".
+4. **Scan:** Verify that the "Bluetooth permission missing" error no longer appears in logs and scanning starts successfully.

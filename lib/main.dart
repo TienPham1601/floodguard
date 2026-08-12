@@ -1,4 +1,6 @@
-import 'package:flutter/material.dart';
+
+
+  import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'firebase_options.dart';
@@ -11,6 +13,7 @@ import 'screens/auth/splash_screen.dart';
 import 'screens/auth/login_screen.dart';
 import 'screens/driver/driver_shell.dart';
 import 'screens/rescue/rescue_shell.dart';
+import 'data/device_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -20,6 +23,9 @@ void main() async {
   
   // Tự động dọn đơn treo lúc mở app
   FirebaseService.cleanupExpiredSOS();
+
+  // Khởi tạo kết nối BLE tự động
+  deviceService.initAutoConnect();
 
   runApp(const FloodGuardApp());
 }

@@ -9,8 +9,16 @@ class VehicleState extends ChangeNotifier {
 
   // Trạng thái thiết bị
   bool isConnected = false;
+  bool isConnecting = false;
+  bool reconnectFailed = false;
+  bool isFullyValidated = false; // Chỉ true khi đã nhận được gói JSON đầu tiên
+  String? connectedDeviceName;
   int batteryLevel = 0;
   String deviceVersion = 'v1.2.0';
+
+  bool isWet = false;
+  String deviceState = 'idle'; // idle, safe, warning, danger
+  double sensorHeight = 40;
 
   double waterCm = 0;
   double warnAt = 20;
@@ -45,14 +53,36 @@ class VehicleState extends ChangeNotifier {
     notifyListeners();
   }
 
+  void updateFromDevice({
+    required bool wet,
+    required double water,
+    required String state,
+    required bool intake,
+    required bool power,
+    required double height,
+    required double warn,
+    required double danger,
+  }) {
+    isWet = wet;
+    deviceState = state;
+    sensorHeight = height;
+    waterCm = water;
+    intakeClosed = intake;
+    powerCut = power;
+    warnAt = warn;
+    dangerAt = danger;
+    notifyListeners();
+  }
+
   void toggleAuto() {
     autoProtect = !autoProtect;
     notifyListeners();
   }
 
-  void saveThresholds(double newWarn, double newDanger) {
+  void saveThresholds(double newWarn, double newDanger, {double? newHeight}) {
     warnAt = newWarn;
     dangerAt = newDanger;
+    if (newHeight != null) sensorHeight = newHeight;
     notifyListeners();
   }
 
@@ -64,12 +94,23 @@ class VehicleState extends ChangeNotifier {
     notifyListeners();
   }
 
+  void resetData() {
+    waterCm = 0;
+    isWet = false;
+    deviceState = 'idle';
+    intakeClosed = false;
+    powerCut = false;
+    notifyListeners();
+  }
+
   void resetToSafe() {
     waterCm = 8;
     tempC = 31;
     humidity = 62;
     pm25 = 31;
     personInside = false;
+    isWet = true;
+    deviceState = 'safe';
     intakeClosed = false;
     powerCut = false;
     notifyListeners();
@@ -82,6 +123,11 @@ class VehicleState extends ChangeNotifier {
 
   void togglePower() {
     powerCut = !powerCut;
+    notifyListeners();
+  }
+
+  /// Thông báo cho các listener cập nhật UI
+  void refresh() {
     notifyListeners();
   }
 }
